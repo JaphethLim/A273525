@@ -630,8 +630,4 @@ int main()
     //test_IntSet();
 
     list_S5(S_4);
-    return 0;
-
-    srand(time(0));
-    estimate_a5(S_4, 100);
 }

@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <vector>
 #include <set>
-#include <unordered_set>
 #include <list>
 #include <gmpxx.h>
 
@@ -62,16 +61,6 @@ static const size_t S_4_size = 875;
 // Lowest common denominator of S_4.
 // (All subset sums of S_4 can be represented with this denominator.)
 static const uint64_t S_4_denom = 17297280;
-
-// Rational subset sum of S_4.
-struct R5 {
-    // Subset sum times S_4_denom
-    uint64_t numer : 48;
-    // Subset size
-    uint64_t size : 16;
-    // The rational value represented by an R5 is
-    //   R5.numer / (S_4_denom * R5.size).
-};
 
 /*
  * Integer (multi-)set data structure.
@@ -547,32 +536,12 @@ void list_S5(const set <mpq_class>& S_4)
  * disjoint from other sizes if S is a large prime
  * (larger than sqrt |S_4| and any prime in S_4_denom).
  *
- * We can compensate for this a bit by remembering and ignoring the
- * duplicate values that we saw in previous samples. If we ignore
- * D duplicates and get a birthday set size K, this is like sampling
- * from a universe of size |S_5| - D.
- * Given that D is at most the number of samples that we are taking,
- * which is itself much smaller than K, we can just ignore this
- * factor in our estimate of |S|.
+ * We can compensate for this a bit by sampling each size S
+ * independently and summing the results. Note that this introduces
+ * some upward bias due to double-counting.
  *
- * Direct estimation:
- *
- * We can also directly estimate how many rational numbers are in S_5.
- * We pick some numbers of the form a/(S_4_denom*s) (before reducing),
- * where 1 <= a <= S_4_denom and 1 <= s <= |S_4|, then determine which
- * of these numbers can be formed as a subset average of S_5.
- * Naïvely, this involves solving some knapsack problems over S_4,
- * which is hard.
- *
- *
- * // We can compensate for this a bit by sampling each size S
- * // independently. We could then sum the results, but then we'd
- * // double-count averages that appear in multiple subsets.
- * // So, we also use a second-order correction. For every pair of sizes
- * // S1 and S2 that share enough common factors, we estimate and
- * // subtract |S1 ∩ S2| by using birthday sampling to estimate |S1 ∪ S2|.
+ * (The code below estimates the total size as 1.1e11.)
  */
-double rand_subset_size(size_t n, size_t s1, size_t s2);
 uint64_t estimate_a5(const set <mpq_class>& S_4, const unsigned n_samples) {
     vector <uint64_t> S_4_scaled;
     for (const mpq_class& x : S_4) {
@@ -626,37 +595,6 @@ uint64_t estimate_a5(const set <mpq_class>& S_4, const unsigned n_samples) {
     DEBUG("First-order birthday estimate for total: %" PRIu64 "\n", total);
 
     return total;
-}
-
-// Return approximately C(n, s1) / (C(n, s1) + C(n, s2)).
-double rand_subset_size(size_t n, size_t s1, size_t s2) {
-    if (s1 >= n/2) {
-        s1 = n - s1;
-    }
-    if (s2 >= n/2) {
-        s2 = n - s2;
-    }
-    // ensure that C(n, s1) >= C(n, s2) and s1 >= s2
-    bool flip = false;
-    if (s2 > s1) {
-        swap(s1, s2);
-        flip = true;
-    }
-    // calculate C(n, s2) / C(n, s1)
-    //  = ∏(n-s1+1 .. n) ∏(1 .. s2) / ∏(n-s2+1 .. n) ∏(1 .. s1)
-    //  = 1 / ∏(n-s1+1 .. n-s2) ∏(s2+1 .. s1)
-    double x2 = 1;
-    for (double i = n - s1 + 1; i <= n - s2; ++i) {
-        x2 /= i;
-    }
-    for (double i = s2 + 1; i <= s1; ++i) {
-        x2 /= i;
-    }
-    if (flip) {
-        return x2 / (1 + x2);
-    } else {
-        return 1 / (1 + x2);
-    }
 }
 
 int main()

@@ -77,6 +77,11 @@ static const uint64_t S_4_denom = 17297280;
  *   11NNN000     next NNN+3 bytes
  * These prefixes are written with the least significant bit first.
  * Gap values are also stored little-endian.
+ *
+ * There is an upper bound of S_4_denom * S_4_size^2 = 8e12
+ * elements of S_5 and estimate_a5 gives a (very inaccurate) guess
+ * of |S_5| = 1.1e11, making the average gap size 80. So we expect
+ * (hope? wish?) that most of the gaps will fit in 1 byte.
  */
 struct IntSet {
     typedef uint64_t value_type;
@@ -232,10 +237,7 @@ struct ChunkedIntSet {
                 if (chunk_iter_ != chunks_end_) {
                     val_iter_ = chunk_iter_->begin();
                     vals_end_ = chunk_iter_->end();
-                    //DEBUG("next chunk: size %zu, next val = %zu\n",
-                    //      chunk_iter_->size(), size_t(*val_iter_));
                 } else {
-                    //DEBUG("chunks end\n");
                     val_iter_.set_ = nullptr;
                 }
             }
@@ -388,8 +390,6 @@ void test_IntSet() {
  * which makes all elements and subset sums integer.
  * Then we add one element at a time to a database of
  * known subset sums (and their sizes).
- *
- * 
  */
 void list_S5(const set <mpq_class>& S_4)
 {
@@ -570,7 +570,6 @@ uint64_t estimate_a5(const set <mpq_class>& S_4, const unsigned n_samples) {
                 vals.insert(avg);
             }
             BD_samples.push_back(vals.size() * vals.size());
-            //DEBUG("Size %zu sample: %" PRIu64 "\n", sz, BD_samples.back());
         }
         sort(BD_samples.begin(), BD_samples.end());
         uint64_t BD_median = BD_samples[BD_samples.size() / 2];

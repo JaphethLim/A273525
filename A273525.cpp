@@ -14,6 +14,7 @@
 #include <cmath>
 #include <ctime>
 #include <algorithm>
+#include <tuple>
 #include <vector>
 #include <set>
 #include <list>

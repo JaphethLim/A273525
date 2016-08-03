@@ -465,10 +465,23 @@ void list_S5(const set <mpq_class>& S_4)
         }
         DEBUG_MORE("\n\n");
     }
-    return;
+}
 
-    // Calculate all subset sums only.
-    // (Answer: 7508566125 unique sums)
+/*
+ * Calculate all subset sums only.
+ * (Answer: 7508566125 unique sums)
+ *
+ * 7.5e9 is 75% of the theoretical range of 10e9 (S_4_denom * S_4_size).
+ * This means that tricks like indexing the subset averages in list_S5
+ * by rank are not going to help much.
+ */
+void subset_sums_S5(const set <mpq_class>& S_4)
+{
+    vector <uint64_t> S_4_scaled;
+    for (const mpq_class& x : S_4) {
+        S_4_scaled.push_back(x.get_num().get_ui() * (S_4_denom / x.get_den().get_ui()));
+    }
+
     ChunkedIntSet raw_subset_sums;
     // This ensures that we collect sums for 1-element sets {x}
     raw_subset_sums.push_back(0);

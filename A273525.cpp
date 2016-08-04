@@ -22,6 +22,7 @@
 #include <list>
 #include <queue>
 #include <gmpxx.h>
+#include <getopt.h>
 
 using namespace std;
 
@@ -167,7 +168,7 @@ struct IntSet {
             stream_.push_back(d >> 6);
         } else {
             unsigned sz = 24;
-            for (; sz >= 64 || d >= value_type(1) << sz; sz += 8);
+            for (; sz < 64 && d >= value_type(1) << sz; sz += 8);
             stream_.push_back(0x3u + ((sz/8 - 3u) << 2));
             for (unsigned i = 0; i < sz; i += 8) {
                 stream_.push_back(d >> i);
@@ -377,24 +378,60 @@ struct ChunkedIntSet {
 };
 
 void test_IntSet() {
-    size_t test_size = 1000000;
-    DEBUG("Test: store %zu integers in IntSet\n", test_size);
-    vector <unsigned> v;
-    for (size_t i = 0; i < test_size; ++i) {
-        v.push_back(rand() % 1000000);
-    }
-    sort(v.begin(), v.end());
+    int seed = time(0);
+    DEBUG("Random seed: %d\n", seed);
+    srand(seed);
 
-    ChunkedIntSet set;
-    for (size_t i = 0; i < v.size(); ++i) {
-        set.push_back(v[i]);
+    auto do_test = [&](const char* noun, vector <uint64_t> v) {
+        DEBUG("Test: store %zu %s in IntSet\n", v.size(), noun);
+        sort(v.begin(), v.end());
+        ChunkedIntSet set;
+        for (size_t i = 0; i < v.size(); ++i) {
+            set.push_back(v[i]);
+        }
+        size_t i;
+        DEBUG("  Testing iterator...\n");
+        i = 0;
+        for (ChunkedIntSet::iterator it = set.begin(); it != set.end(); ++it, ++i) {
+            assert (*it == v[i]);
+        }
+        DEBUG("  success. Used %zu bytes to store %zu %s\n",
+              set.space(), v.size(), noun);
+
+        assert (i == v.size());
+        DEBUG("  Testing wicked_iterator...\n");
+        i = 0;
+        for (ChunkedIntSet::wicked_iterator it = set.wicked_begin();
+             it != set.wicked_end(); ++it, ++i) {
+            assert (*it == v[i]);
+        }
+        assert (set.size() == 0);
+        assert (i == v.size());
+        DEBUG("  success.\n");
+    };
+
+    size_t test_size = 1000000;
+    {
+        vector <uint64_t> v;
+        for (size_t i = 0; i < test_size; ++i) {
+            v.push_back(rand() % test_size);
+        }
+        do_test("small integers", v);
     }
-    size_t i = 0;
-    for (ChunkedIntSet::iterator it = set.begin(); it != set.end(); ++it, ++i) {
-        assert (*it == v[i]);
+    {
+        vector <uint64_t> v;
+        for (size_t i = 0; i < test_size; ++i) {
+            v.push_back(rand());
+        }
+        do_test("medium integers", v);
     }
-    DEBUG("Success. Used %zu bytes to store %zu integers\n",
-          set.space(), test_size);
+    {
+        vector <uint64_t> v;
+        for (size_t i = 0; i < test_size; ++i) {
+            v.push_back(uint64_t(rand()) * uint64_t(rand()));
+        }
+        do_test("large integers", v);
+    }
 }
 
 /*
@@ -853,7 +890,7 @@ uint64_t estimate_a5(const set <mpq_class>& S_4, const unsigned n_samples) {
     return total;
 }
 
-int main()
+int main(int argc, char** argv)
 {
     set <mpq_class> S_0 = {0, 1};
     set <mpq_class> S_1 = next_naive(S_0);
@@ -870,7 +907,42 @@ int main()
         assert (S_4.size() == S_4_size);
     }
 
-    //test_IntSet();
+    const char* usage =
+        "Usage: %1$s\n"
+        "       %1$s -t [intset|dryrun_s4]\n";
+
+    int opt;
+    while ((opt = getopt(argc, argv, "ht:")) != -1) {
+        switch (opt) {
+        case 'h':
+            printf(usage, argv[0]);
+            return 0;
+        case 't':
+            if (!strcmp(optarg, "intset")) {
+                test_IntSet();
+                return 0;
+            } else if (!strcmp(optarg, "dryrun_s4")) {
+                // We expect that the list_S5 algorithm also works
+                // when used to calculate S_4.
+                size_t size = list_S5(S_3);
+                if (size == S_4_size) {
+                    printf("S_4 test passed.\n");
+                    return 0;
+                } else {
+                    printf("S_4 test failed: expected %zu, got %zu\n",
+                           S_4_size, size);
+                    return 1;
+                }
+            } else {
+                fprintf(stderr, "Error: no such test: %s\n", optarg);
+                return 1;
+            }
+            break;
+        default:
+            fprintf(stderr, usage, argv[0]);
+            return 1;
+        }
+    }
 
     list_S5(S_4);
 }

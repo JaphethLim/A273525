@@ -7,4 +7,8 @@ A273525: A273525.cpp
 clean:
 	rm A273525
 
-.PHONY: clean
+test: A273525
+	./A273525 -t intset
+	./A273525 -t dryrun_s4
+
+.PHONY: clean test

@@ -15,9 +15,12 @@
 #include <ctime>
 #include <algorithm>
 #include <tuple>
+#include <thread>
+#include <mutex>
 #include <vector>
 #include <set>
 #include <list>
+#include <queue>
 #include <gmpxx.h>
 
 using namespace std;
@@ -195,6 +198,11 @@ struct IntSet {
         std::swap(size_, set.size_);
         std::swap(max_, set.max_);
     }
+    void clear() {
+        stream_.clear();
+        size_ = 0;
+        max_ = 0;
+    }
 };
 
 /*
@@ -211,8 +219,8 @@ struct ChunkedIntSet {
      * Once the current chunk has surpassed chunk_size_, it continues
      * to be used up to its current capacity() - 8. The -8 term is
      * because storing the next value could require up to 9 bytes. */
-    // 128K — gcc's resize policy typically rounds up to 256K
-    static const size_t chunk_size_ = 1 << 17;
+    // 512K — gcc's resize policy typically rounds up to 1M
+    static const size_t chunk_size_ = 1 << 19;
     static const size_t value_size_ = 9;
 
     struct iterator {
@@ -306,6 +314,10 @@ struct ChunkedIntSet {
         chunks_.swap(set.chunks_);
         std::swap(size_, set.size_);
     }
+    void clear() {
+        chunks_.clear();
+        size_ = 0;
+    }
 
     // Iterator that behaves like a wick, destroying chunks behind it.
     // This frees up memory as the set is traversed.
@@ -391,81 +403,312 @@ void test_IntSet() {
  * which makes all elements and subset sums integer.
  * Then we add one element at a time to a database of
  * known subset sums (and their sizes).
+ * Finally, we remove duplicates from the averages.
  */
-void list_S5(const set <mpq_class>& S_4)
+static const unsigned num_threads = 4;
+uint64_t list_S5(const set <mpq_class>& S_4)
 {
     vector <uint64_t> S_4_scaled;
     for (const mpq_class& x : S_4) {
         S_4_scaled.push_back(x.get_num().get_ui() * (S_4_denom / x.get_den().get_ui()));
     }
 
-    ChunkedIntSet subset_sums[S_4_size + 1];
-    // We add the subset sum 0 to each size, to ensure that we collect
-    // sums for 1-element sets {x}. This is ok because S_4 does
-    // contain 0, and 0/sz = 0 for all subset sizes sz.
-    for (size_t i = 0; i <= S_4_size; ++i) {
-        subset_sums[i].push_back(0);
-    }
+    vector <ChunkedIntSet> subset_sums(S_4.size() + 1);
+    // Ensure that we collect sums for 1-element sets {x}.
+    subset_sums[0].push_back(0);
 
     // Add each element to the known subset sums.
-    for (size_t iter = 0; iter < S_4_size; ++iter) {
-        uint64_t x = S_4_scaled[iter];
-        if (x == 0) {
-            // we already added 0 previously
-            continue;
+    for (size_t iter = 1; iter <= S_4.size(); ++iter) {
+        uint64_t x = S_4_scaled[iter-1];
+
+        vector <ChunkedIntSet> new_subset_sums(iter + 1);
+        // We farm out the per-sz merges to multiple threads.
+        mutex pool_mutex;
+        vector <size_t> merge_jobs;
+        for (size_t sz = 1; sz <= iter; ++sz) {
+            merge_jobs.push_back(sz);
         }
 
-        // This merges subset_sums[sz] + {x} into subset_sums[sz+1]
-        for (unsigned sz = iter+1; sz > 0; --sz) {
-            ChunkedIntSet new_sums;
-            /*
-             * We want to merge {x+y | y in subset_sums[sz-1]} and
-             * subset_sums[sz] into new_sums. To conserve memory,
-             * we use a wicked iterator to burn up subset_sums[sz].
-             */
-            ChunkedIntSet::iterator ix = subset_sums[sz-1].begin();
-            ChunkedIntSet::wicked_iterator i = subset_sums[sz].wicked_begin();
+        // Each subset_sums[i] is used in two merges, and we'd like to
+        // delete it after both are finished.
+        vector <bool> lower_merged(subset_sums.size()), upper_merged(subset_sums.size());
+        // Except for subset_sum[iter], which is only merged once.
+        // (So is subset_sum[0], but we never touch it.)
+        lower_merged[iter] = true;
+
+        auto worker = [&]() {
             for (;;) {
-                if (i == subset_sums[sz].wicked_end()) {
-                    if (ix == subset_sums[sz-1].end()) {
-                        break;
+                size_t sz;
+                { lock_guard <mutex> lock(pool_mutex);
+                    if (merge_jobs.empty()) {
+                        return;
                     } else {
-                        new_sums.push_back(*ix + x);
-                        ++ix;
-                    }
-                } else if (ix == subset_sums[sz-1].end()) {
-                    new_sums.push_back(*i);
-                    ++i;
-                } else {
-                    if (*i < *ix + x) {
-                        new_sums.push_back(*i);
-                        ++i;
-                    } else if (*i > *ix + x) {
-                        new_sums.push_back(*ix + x);
-                        ++ix;
-                    } else {
-                        new_sums.push_back(*i);
-                        ++i, ++ix;
+                        sz = merge_jobs.back();
+                        merge_jobs.pop_back();
                     }
                 }
+                // Merge {x+y | y in subset_sums[sz-1]} and subset_sums[sz]
+                // into new_subset_sums[sz].
+                ChunkedIntSet::iterator ix = subset_sums[sz-1].begin();
+                ChunkedIntSet::iterator i = subset_sums[sz].begin();
+                for (;;) {
+                    if (i == subset_sums[sz].end()) {
+                        if (ix == subset_sums[sz-1].end()) {
+                            break;
+                        } else {
+                            new_subset_sums[sz].push_back(*ix + x);
+                            ++ix;
+                        }
+                    } else if (ix == subset_sums[sz-1].end()) {
+                        new_subset_sums[sz].push_back(*i);
+                        ++i;
+                    } else {
+                        if (*i < *ix + x) {
+                            new_subset_sums[sz].push_back(*i);
+                            ++i;
+                        } else if (*i > *ix + x) {
+                            new_subset_sums[sz].push_back(*ix + x);
+                            ++ix;
+                        } else {
+                            new_subset_sums[sz].push_back(*i);
+                            ++i, ++ix;
+                        }
+                    }
+                }
+                // Done
+                { lock_guard <mutex> lock(pool_mutex);
+                  lower_merged[sz-1] = upper_merged[sz] = true;
+                  if (lower_merged[sz-1] && upper_merged[sz-1]) {
+                      subset_sums[sz-1].clear();
+                  }
+                  if (lower_merged[sz] && upper_merged[sz]) {
+                      subset_sums[sz].clear();
+                  }
+                }
             }
-            subset_sums[sz].swap(new_sums);
+        };
+
+        vector <thread> worker_pool;
+        for (size_t i = 0; i < num_threads; ++i) {
+            worker_pool.emplace_back(thread(worker));
+        }
+        for (thread& worker : worker_pool) {
+            worker.join();
+        }
+        for (size_t sz = 1; sz <= iter; ++sz) {
+            subset_sums[sz].swap(new_subset_sums[sz]);
         }
 
-        // stats
+        // Print stats
         size_t size = 0, mem = 0;
-        for (size_t i = 1; i <= iter+1; ++i) {
+        for (size_t i = 1; i <= iter; ++i) {
             size += subset_sums[i].size();
             mem += subset_sums[i].capacity();
         }
         DEBUG("Done iter %zu (elem = %3zu/%3zu), size = %zu, mem = %zu K, subset sizes:",
-              iter+1, x / gcd(x, S_4_denom), S_4_denom / gcd(x, S_4_denom),
+              iter, x / gcd(x, S_4_denom), S_4_denom / gcd(x, S_4_denom),
               size, mem >> 10);
-        for (size_t i = 1; i <= iter+1; ++i) {
+        for (size_t i = 1; i <= iter; ++i) {
             DEBUG_MORE(" %zu", subset_sums[i].size());
         }
-        DEBUG_MORE("\n\n");
+        DEBUG_MORE("\n");
+
+        if (false) {
+            // Print everything
+            DEBUG("Subset sums:\n");
+            for (size_t sz = 1; sz < subset_sums.size(); ++sz) {
+                if (subset_sums[sz].size() == 0) continue;
+                DEBUG("  Size %zu:", sz);
+                for (uint64_t x: subset_sums[sz]) {
+                    uint64_t d = gcd(x, sz * S_4_denom);
+                    DEBUG_MORE(" %zu/%zu", x / d, sz * S_4_denom / d);
+                }
+                DEBUG_MORE("\n");
+            }
+        }
+
+        DEBUG("\n");
     }
+
+    /*
+     * Compute and collect the subset averages.
+     * Each sequence subset_sums[sz] = a1/sz, a2/sz...
+     * is already sorted; we reduce them to lowest terms i.e.
+     * a_i/sz = b_i/d_i, then group them into subsequences for
+     * each d_i. Note that each subsequence is still sorted.
+     */
+    vector <list <ChunkedIntSet>> denom_groups(subset_sums.size());
+    {
+        // We farm out the extraction of subsequences to threads.
+        mutex pool_mutex;
+        vector <size_t> extract_jobs;
+        for (size_t i = 1; i < subset_sums.size(); ++i) {
+            extract_jobs.push_back(i);
+        }
+        auto worker = [&]() {
+            for (;;) {
+                size_t sz;
+                {   lock_guard <mutex> lock(pool_mutex);
+                    if (extract_jobs.empty()) {
+                        return;
+                    }
+                    sz = extract_jobs.back();
+                    extract_jobs.pop_back();
+                }
+                vector <ChunkedIntSet> denom_subgroups(denom_groups.size());
+                // Wicked iterator reallocates memory to the new subsequences
+                // (actually, they will use slightly more memory due to
+                // larger gap sizes and chunk fragmentation).
+                for (ChunkedIntSet::wicked_iterator i = subset_sums[sz].wicked_begin();
+                     i != subset_sums[sz].wicked_end(); ++i) {
+                    uint64_t x = *i;
+                    if (x == 0 && sz > 1) {
+                        // These were fake entries we added earlier
+                        continue;
+                    }
+                    uint64_t d = gcd(x, sz);
+                    denom_subgroups[sz / d].push_back(x / d);
+                }
+                // Return the results
+                {   lock_guard <mutex> lock(pool_mutex);
+                    size_t mem = 0;
+                    for (ChunkedIntSet& subgroup: denom_subgroups) {
+                        mem += subgroup.capacity();
+                    }
+                    DEBUG("Collected results for size %zu, mem = %zu K, sizes:",
+                          sz, mem / 1024);
+                    for (size_t i = 0; i < denom_subgroups.size(); ++i) {
+                        if (denom_subgroups[i].size()) {
+                            DEBUG_MORE(" %zu", denom_subgroups[i].size());
+                            denom_groups[i].emplace_back(move(denom_subgroups[i]));
+                        }
+                    }
+                    DEBUG_MORE("\n");
+                }
+            }
+        };
+
+        vector <thread> worker_pool;
+        for (size_t i = 0; i < num_threads; ++i) {
+            worker_pool.emplace_back(thread(worker));
+        }
+        for (thread& worker : worker_pool) {
+            worker.join();
+        }
+        subset_sums.clear();
+    }
+    DEBUG("\n");
+
+    // Merge sequences for each denominator
+    size_t S_5_size = 0;
+    {
+        mutex pool_mutex;
+        vector <size_t> merge_jobs;
+        for (size_t i = 1; i < denom_groups.size(); ++i) {
+            merge_jobs.push_back(i);
+        }
+        auto larger_group = [&](const list <ChunkedIntSet>::iterator& i1,
+                                const list <ChunkedIntSet>::iterator& i2) {
+            return i1->size() > i2->size();
+        };
+        auto worker = [&]() {
+            for (;;) {
+                size_t denom;
+                {   lock_guard <mutex> lock(pool_mutex);
+                    if (merge_jobs.empty()) {
+                        return;
+                    }
+                    denom = merge_jobs.back();
+                    merge_jobs.pop_back();
+                }
+                // The subsequences have varying sizes; we use a
+                // priority_queue to merge the smallest pair first.
+                priority_queue <list <ChunkedIntSet>::iterator,
+                                vector <list <ChunkedIntSet>::iterator>,
+                                decltype(larger_group)>
+                    merge_queue(larger_group);
+                for (list <ChunkedIntSet>::iterator i = denom_groups[denom].begin();
+                     i != denom_groups[denom].end(); ++i) {
+                    merge_queue.push(i);
+                }
+                while (merge_queue.size() > 1) {
+                    list <ChunkedIntSet>::iterator group1 = merge_queue.top();
+                    merge_queue.pop();
+                    list <ChunkedIntSet>::iterator group2 = merge_queue.top();
+                    merge_queue.pop();
+                    // Merge group1 and group2 into a new set, then store it in group1
+                    ChunkedIntSet merged_group;
+                    ChunkedIntSet::wicked_iterator i1 = group1->wicked_begin(),
+                                                   i2 = group2->wicked_begin();
+                    for (;;) {
+                        if (i1 == group1->wicked_end()) {
+                            if (i2 == group2->wicked_end()) {
+                                break;
+                            } else {
+                                merged_group.push_back(*i2);
+                                ++i2;
+                            }
+                        } else if (i2 == group2->wicked_end()) {
+                            merged_group.push_back(*i1);
+                            ++i1;
+                        } else if (*i1 < *i2) {
+                            merged_group.push_back(*i1);
+                            ++i1;
+                        } else if (*i2 < *i1) {
+                            merged_group.push_back(*i2);
+                            ++i2;
+                        } else {
+                            merged_group.push_back(*i1);
+                            ++i1, ++i2;
+                        }
+                    }
+                    group1->swap(merged_group);
+                    // *group2 is now empty. denom_group[denom] is a list
+                    // so we can safely erase group2
+                    denom_groups[denom].erase(group2);
+                    // Continue merging
+                    merge_queue.push(group1);
+                }
+
+                // Size for this denom
+                {   lock_guard <mutex> lock(pool_mutex);
+                    size_t denom_count = 0, mem = 0;
+                    if (!merge_queue.empty()) {
+                        denom_count += merge_queue.top()->size();
+                        mem += merge_queue.top()->capacity();
+                    }
+                    DEBUG("Merged denominator %zu: %zu elems, mem %zu K\n",
+                          denom, denom_count, mem / 1024);
+
+                    if (false) {
+                        // Print everything
+                        if (!merge_queue.empty()) {
+                            DEBUG("Elems:");
+                            for (uint64_t x: *merge_queue.top()) {
+                                uint64_t d = gcd(x, denom * S_4_denom);
+                                DEBUG_MORE(" %zu/%zu", x / d, denom * S_4_denom / d);
+                            }
+                            DEBUG_MORE("\n");
+                        }
+                    }
+                    S_5_size += denom_count;
+                }
+            }
+        };
+
+        vector <thread> worker_pool;
+        for (size_t i = 0; i < num_threads; ++i) {
+            worker_pool.emplace_back(thread(worker));
+        }
+        for (thread& worker : worker_pool) {
+            worker.join();
+        }
+    }
+    DEBUG("\n");
+
+    // FIXME: we only return the size; we don't bother returning the elements
+    // as promised in the header comment
+    return S_5_size;
 }
 
 /*

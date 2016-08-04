@@ -24,6 +24,15 @@
 #include <gmpxx.h>
 #include <getopt.h>
 
+#ifdef __GNUC__
+# define likely(x) __builtin_expect(x, 1)
+# define unlikely(x) __builtin_expect(x, 0)
+#else
+# warning "non GNU compiler; using dummy likely() and unlikely() macros"
+# define likely(x) (x)
+# define unlikely(x) (x)
+#endif
+
 using namespace std;
 
 #define DEBUG(...) fprintf(stderr, "[debug] " __VA_ARGS__);
@@ -124,9 +133,9 @@ struct IntSet {
             assert (set_);
             assert (pos_ < set_->stream_.size());
             unsigned b0 = set_->stream_[pos_];
-            if ((b0 & 0x1u) == 0) {
+            if (likely((b0 & 0x1u) == 0)) {
                 return pair <unsigned, value_type> (1, b0 >> 1);
-            } else if ((b0 & 0x3u) == 0x1u) {
+            } else if (likely((b0 & 0x3u) == 0x1u)) {
                 assert (pos_ + 1 < set_->stream_.size());
                 unsigned b1 = set_->stream_[pos_ + 1];
                 return pair <unsigned, value_type> (2, (b0 >> 2) | (b1 << 6));
@@ -161,9 +170,9 @@ struct IntSet {
     void push_back(value_type v) {
         assert (v >= max_);
         value_type d = v - max_;
-        if (d < value_type(1) << 7) {
+        if (likely(d < value_type(1) << 7)) {
             stream_.push_back((d << 1) | 0x0u);
-        } else if (d < value_type(1) << 14) {
+        } else if (likely(d < value_type(1) << 14)) {
             stream_.push_back((d << 2) | 0x1u);
             stream_.push_back(d >> 6);
         } else {
@@ -278,8 +287,8 @@ struct ChunkedIntSet {
 
     void push_back(value_type v) {
         IntSet* curr_set = &chunks_.back();
-        if (curr_set->capacity() > chunk_size_ &&
-            curr_set->space() + value_size_ > curr_set->capacity()) {
+        if (unlikely(curr_set->space() + value_size_ > curr_set->capacity() &&
+                     curr_set->capacity() > chunk_size_)) {
             chunks_.push_back(IntSet());
             curr_set = &chunks_.back();
         }
@@ -490,14 +499,14 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                 ChunkedIntSet::iterator i = subset_sums[sz].begin();
                 ChunkedIntSet new_sums;
                 for (;;) {
-                    if (i == subset_sums[sz].end()) {
-                        if (ix == subset_sums[sz-1].end()) {
+                    if (unlikely(i == subset_sums[sz].end())) {
+                        if (unlikely(ix == subset_sums[sz-1].end())) {
                             break;
                         } else {
                             new_sums.push_back(*ix + x);
                             ++ix;
                         }
-                    } else if (ix == subset_sums[sz-1].end()) {
+                    } else if (unlikely(ix == subset_sums[sz-1].end())) {
                         new_sums.push_back(*i);
                         ++i;
                     } else {
@@ -676,14 +685,14 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                     ChunkedIntSet::wicked_iterator i1 = group1->wicked_begin(),
                                                    i2 = group2->wicked_begin();
                     for (;;) {
-                        if (i1 == group1->wicked_end()) {
-                            if (i2 == group2->wicked_end()) {
+                        if (unlikely(i1 == group1->wicked_end())) {
+                            if (unlikely(i2 == group2->wicked_end())) {
                                 break;
                             } else {
                                 merged_group.push_back(*i2);
                                 ++i2;
                             }
-                        } else if (i2 == group2->wicked_end()) {
+                        } else if (unlikely(i2 == group2->wicked_end())) {
                             merged_group.push_back(*i1);
                             ++i1;
                         } else if (*i1 < *i2) {

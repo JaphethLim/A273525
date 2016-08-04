@@ -8,20 +8,30 @@
  * This program calculates a_5.
  */
 
-#include <cstdio>
 #include <cinttypes>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
-#include <algorithm>
-#include <tuple>
-#include <thread>
+
 #include <mutex>
-#include <vector>
-#include <set>
+#include <thread>
+
+#include <algorithm>
 #include <list>
 #include <queue>
+#include <set>
+#include <tuple>
+#include <vector>
+
 #include <gmpxx.h>
+
 #include <getopt.h>
+
+// TurboPFor includes
+#include "bitpack.h"
+#include "bitunpack.h"
+#include "vp4dc.h"
+#include "vp4dd.h"
 
 #ifdef ROCKET
 # define assert(...) (void)0
@@ -30,8 +40,12 @@
 #endif
 
 #ifdef __GNUC__
-# define likely(x) __builtin_expect(x, 1)
-# define unlikely(x) __builtin_expect(x, 0)
+# ifndef likely
+#  define likely(x) __builtin_expect(x, 1)
+# endif
+# ifndef unlikely
+#  define unlikely(x) __builtin_expect(x, 0)
+# endif
 #else
 # warning "non GNU compiler; using dummy likely() and unlikely() macros"
 # define likely(x) (x)
@@ -88,76 +102,80 @@ static const uint64_t S_4_denom = 17297280;
  * (element-wise operations such as union and set difference
  *  are easy to implement on top).
  *
- * We encode only the differences between the values. We use a
- * self-delimiting bytestream with the following formats:
- *   Prefix       Gap size
- *   0            7 bits
- *   10           14 bits
- *   11NNN000     next NNN+3 bytes
- * These prefixes are written with the least significant bit first.
- * Gap values are also stored little-endian.
- *
- * There is an upper bound of S_4_denom * S_4_size^2 = 8e12
- * elements of S_5 and estimate_a5 gives a (very inaccurate) guess
- * of |S_5| = 1.1e11, making the average gap size 80. So we expect
- * (hope? wish?) that most of the gaps will fit in 1 byte.
+ * We use TurboPFor to compress and decompress blocks of integer gaps
+ * (P4DSIZE=128 values per block). To accommodate iteration and
+ * push_back, sets and iterators have an internal buffer of integers.
+ * (NB: this means that iterators are over 1KiB in size.)
  */
-template <typename byte_vector = vector <uint8_t>>
 struct IntSet {
     typedef uint64_t value_type;
 
-    byte_vector stream_;
-    size_t size_;
-    value_type max_;
+    // FIXME: std::min isn't constexpr??
+    static const size_t buffer_size_ = P4DSIZE > 128? 128 : P4DSIZE;
+    // Conservative guess used by push_back and ChunkedIntSet
+    // Note that log C(2^64, 128) < 934 bytes so we should be safe
+    static const size_t enc_buffer_size_ = buffer_size_ * 8;
+
+    vector <uint8_t> stream_;
+    size_t stream_size_; // number of values in stream
+    array <value_type, buffer_size_> buffer_;
+    size_t pending_; // number of values in buffer
+    value_type max_; // largest value in stream_, else 0
 
     struct iterator {
         const IntSet* set_;
-        size_t pos_;
-        uint64_t value_;
+        size_t elem_pos_, stream_pos_, buffer_pos_;
+        array <value_type, buffer_size_> buffer_;
 
         iterator():
-            set_(nullptr), pos_(0), value_(0) {
+            set_(nullptr) {
         }
         iterator(const iterator&) = default;
         iterator& operator=(const iterator&) = default;
         iterator(const IntSet& set):
-            set_(&set), pos_(0), value_(0) {
+            set_(&set), elem_pos_(0), stream_pos_(0) {
+            if (elem_pos_ < set.stream_size_) {
+                stream_pos_ =
+                    p4ddec64(const_cast <uint8_t*> (&set.stream_[stream_pos_]),
+                             buffer_size_, &buffer_[0])
+                     - &set.stream_[0];
+                for (size_t i = 1; i < buffer_size_; ++i) {
+                    buffer_[i] += buffer_[i-1];
+                }
+                buffer_pos_ = 0;
+            }
         }
 
         iterator& operator++() {
-            unsigned len;
-            value_type val;
-            tie(len, val) = decode();
-            pos_ += len;
-            value_ += val;
+            if (elem_pos_ < set_->stream_size_) {
+                ++buffer_pos_;
+                ++elem_pos_;
+                if (buffer_pos_ == buffer_size_ && elem_pos_ < set_->stream_size_) {
+                    uint64_t prev = buffer_.back();
+                    stream_pos_ =
+                        p4ddec64(const_cast <uint8_t*> (&set_->stream_[stream_pos_]),
+                                 buffer_size_, &buffer_[0])
+                         - &set_->stream_[0];
+                    buffer_[0] += prev;
+                    for (size_t i = 1; i < buffer_size_; ++i) {
+                        buffer_[i] += buffer_[i-1];
+                    }
+                    buffer_pos_ = 0;
+                }
+            } else {
+                ++elem_pos_;
+            }
             return *this;
         }
         value_type operator*() const {
-            return value_ + decode().second;
-        }
-        pair <unsigned, value_type> decode() const {
-            assert (set_);
-            assert (pos_ < set_->stream_.size());
-            unsigned b0 = set_->stream_[pos_];
-            if (likely((b0 & 0x1u) == 0)) {
-                return pair <unsigned, value_type> (1, b0 >> 1);
-            } else if (likely((b0 & 0x3u) == 0x1u)) {
-                assert (pos_ + 1 < set_->stream_.size());
-                unsigned b1 = set_->stream_[pos_ + 1];
-                return pair <unsigned, value_type> (2, (b0 >> 2) | (b1 << 6));
+            if (elem_pos_ < set_->stream_size_) {
+                return buffer_[buffer_pos_];
             } else {
-                assert ((b0 & 0x3u) == 0x3u);
-                unsigned bytes = (b0 >> 2) + 3;
-                assert (bytes >= 3 && bytes <= 8 && pos_ + bytes < set_->stream_.size());
-                value_type val = 0;
-                for (unsigned i = bytes; i > 0; --i) {
-                    val = (val << 8) | set_->stream_[pos_ + i];
-                }
-                return pair <unsigned, value_type> (bytes + 1, val);
+                return set_->buffer_[elem_pos_ - set_->stream_size_];
             }
         }
         bool operator==(const iterator& it) const {
-            return set_ == it.set_ && pos_ == it.pos_;
+            return set_ == it.set_ && elem_pos_ == it.elem_pos_;
         }
         bool operator!=(const iterator& it) const {
             return !operator==(it);
@@ -165,7 +183,7 @@ struct IntSet {
     };
 
     IntSet():
-        size_(0), max_(0) {
+        stream_size_(0), pending_(0), max_(0) {
     }
     IntSet(const IntSet& set) = default;
     IntSet(IntSet&& set) = default;
@@ -174,33 +192,34 @@ struct IntSet {
     ~IntSet() = default;
 
     void push_back(value_type v) {
-        assert (v >= max_);
-        value_type d = v - max_;
-        if (likely(d < value_type(1) << 7)) {
-            stream_.push_back((d << 1) | 0x0u);
-        } else if (likely(d < value_type(1) << 14)) {
-            stream_.push_back((d << 2) | 0x1u);
-            stream_.push_back(d >> 6);
-        } else {
-            unsigned sz = 24;
-            for (; sz < 64 && d >= value_type(1) << sz; sz += 8);
-            stream_.push_back(0x3u + ((sz/8 - 3u) << 2));
-            for (unsigned i = 0; i < sz; i += 8) {
-                stream_.push_back(d >> i);
+        buffer_[pending_++] = v;
+        if (pending_ == buffer_size_) {
+            // Be extra careful here
+            uint8_t buf[enc_buffer_size_ + 100];
+            uint64_t new_max = buffer_.back();
+            for (size_t i = buffer_size_ - 1; i > 0; --i) {
+                buffer_[i] -= buffer_[i-1];
             }
+            buffer_[0] -= max_;
+            uint8_t* buf_end = p4denc64(&buffer_[0], buffer_size_, buf);
+            // Check our original bound
+            assert (buf_end - buf < ssize_t(enc_buffer_size_));
+            stream_.insert(stream_.end(), buf, buf_end);
+            stream_size_ += pending_;
+            pending_ = 0;
+            max_ = new_max;
         }
-        max_ = v;
-        ++size_;
     }
     size_t size() const {
-        return size_;
+        return stream_size_ + pending_;
     }
     iterator begin() const {
         return iterator(*this);
     }
     iterator end() const {
-        iterator it(*this);
-        it.pos_ = stream_.size();
+        iterator it;
+        it.set_ = this;
+        it.elem_pos_ = size();
         return it;
     }
     size_t space() const {
@@ -211,13 +230,14 @@ struct IntSet {
     }
     void swap(IntSet& set) {
         stream_.swap(set.stream_);
-        std::swap(size_, set.size_);
+        std::swap(stream_size_, set.stream_size_);
+        buffer_.swap(set.buffer_);
+        std::swap(pending_, set.pending_);
         std::swap(max_, set.max_);
     }
     void clear() {
         stream_.clear();
-        size_ = 0;
-        max_ = 0;
+        stream_size_ = pending_ = max_ = 0;
     }
 };
 
@@ -225,81 +245,21 @@ struct IntSet {
  * Chunked version of IntSet. Avoids memory (re-)allocation issues
  * for very large sets.
  */
-// Lightweight vector with fixed size
-struct byte_chunk {
-    typedef uint8_t value_type;
-    static const size_t chunk_size_ = 65000; // ~ 64KiB
-
-    unique_ptr <array <value_type, chunk_size_>> array_;
-    size_t size_;
-
-    byte_chunk():
-        array_(new array <value_type, chunk_size_> ()),
-        size_(0) {
-    }
-    byte_chunk(const byte_chunk& v):
-        array_(new array <value_type, chunk_size_> (*v.array_)),
-        size_(v.size_) {
-    }
-    byte_chunk(byte_chunk&& v):
-        array_(v.array_.release()), size_(v.size_) {
-    }
-    byte_chunk& operator=(const byte_chunk& v) {
-        array_.reset(new array <value_type, chunk_size_> (*v.array_));
-        size_ = v.size_;
-        return *this;
-    }
-    byte_chunk& operator=(byte_chunk&& v) {
-        array_.reset(v.array_.release());
-        size_ = v.size_;
-        return *this;
-    }
-    ~byte_chunk() = default;
-
-    void push_back(value_type v) {
-        (*array_)[size_++] = v;
-    }
-    void pop_back(value_type v) {
-        --size_;
-    }
-    value_type& back() {
-        return operator[](size_ - 1);
-    }
-    value_type back() const {
-        return operator[](size_ - 1);
-    }
-    value_type& operator[](size_t i) {
-        return (*array_)[i];
-    }
-    value_type operator[](size_t i) const {
-        return (*array_)[i];
-    }
-    size_t size() const {
-        return size_;
-    }
-    size_t capacity() const {
-        return chunk_size_;
-    }
-    void swap(byte_chunk& v) {
-        array_.swap(v.array_);
-        std::swap(size_, v.size_);
-    }
-};
 struct ChunkedIntSet {
-    typedef IntSet <byte_chunk>::value_type value_type;
+    typedef IntSet::value_type value_type;
 
-    list <IntSet <byte_chunk>> chunks_;
+    list <IntSet> chunks_;
     size_t size_;
 
-    /* We use up to chunk_size_ - (value_size_ - 1) bytes of each chunk.
+    /* We use up to chunk_size_ - buffer_size_enc_ bytes of each chunk.
      * This is to avoid having to deal with overrunning the space in
      * each chunk when inserting. */
-    static const size_t chunk_size_ = byte_chunk::chunk_size_;
+    static const size_t chunk_size_ = 1 << 19;
     static const size_t value_size_ = 9;
 
     struct iterator {
-        list <IntSet <byte_chunk>>::const_iterator chunk_iter_, chunks_end_;
-        IntSet <byte_chunk>::iterator val_iter_, vals_end_;
+        list <IntSet>::const_iterator chunk_iter_, chunks_end_;
+        IntSet::iterator val_iter_, vals_end_;
 
         iterator() = default;
         iterator(const ChunkedIntSet& set):
@@ -349,13 +309,20 @@ struct ChunkedIntSet {
     ~ChunkedIntSet() = default;
 
     void push_back(value_type v) {
-        if (unlikely(chunks_.empty() ||
-                     chunks_.back().space() + value_size_ > chunk_size_)) {
-            IntSet <byte_chunk> new_chunk;
+        if (unlikely(chunks_.empty())) {
+            IntSet new_chunk;
             new_chunk.push_back(v);
             chunks_.emplace_back(new_chunk);
         } else {
-            chunks_.back().push_back(v);
+            IntSet& curr_set = chunks_.back();
+            if (unlikely(curr_set.space() + IntSet::enc_buffer_size_ > curr_set.capacity() &&
+                         curr_set.capacity() > chunk_size_)) {
+                IntSet new_chunk;
+                new_chunk.push_back(v);
+                chunks_.emplace_back(new_chunk);
+            } else {
+                curr_set.push_back(v);
+            }
         }
         ++size_;
     }
@@ -372,14 +339,14 @@ struct ChunkedIntSet {
     }
     size_t space() const {
         size_t t = 0;
-        for (const IntSet <byte_chunk>& chunk : chunks_) {
+        for (const IntSet& chunk : chunks_) {
             t += chunk.space();
         }
         return t;
     }
     size_t capacity() const {
         size_t t = 0;
-        for (const IntSet <byte_chunk>& chunk : chunks_) {
+        for (const IntSet& chunk : chunks_) {
             t += chunk.capacity();
         }
         return t;
@@ -397,8 +364,8 @@ struct ChunkedIntSet {
     // This frees up memory as the set is traversed.
     struct wicked_iterator {
         ChunkedIntSet* set_;
-        list <IntSet <byte_chunk>>::iterator chunk_iter_, chunks_end_;
-        IntSet <byte_chunk>::iterator val_iter_, vals_end_;
+        list <IntSet>::iterator chunk_iter_, chunks_end_;
+        IntSet::iterator val_iter_, vals_end_;
 
         wicked_iterator() = default;
         wicked_iterator(ChunkedIntSet& set):

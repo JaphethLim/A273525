@@ -488,32 +488,34 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                 // into new_subset_sums[sz].
                 ChunkedIntSet::iterator ix = subset_sums[sz-1].begin();
                 ChunkedIntSet::iterator i = subset_sums[sz].begin();
+                ChunkedIntSet new_sums;
                 for (;;) {
                     if (i == subset_sums[sz].end()) {
                         if (ix == subset_sums[sz-1].end()) {
                             break;
                         } else {
-                            new_subset_sums[sz].push_back(*ix + x);
+                            new_sums.push_back(*ix + x);
                             ++ix;
                         }
                     } else if (ix == subset_sums[sz-1].end()) {
-                        new_subset_sums[sz].push_back(*i);
+                        new_sums.push_back(*i);
                         ++i;
                     } else {
                         if (*i < *ix + x) {
-                            new_subset_sums[sz].push_back(*i);
+                            new_sums.push_back(*i);
                             ++i;
                         } else if (*i > *ix + x) {
-                            new_subset_sums[sz].push_back(*ix + x);
+                            new_sums.push_back(*ix + x);
                             ++ix;
                         } else {
-                            new_subset_sums[sz].push_back(*i);
+                            new_sums.push_back(*i);
                             ++i, ++ix;
                         }
                     }
                 }
                 // Done
                 { lock_guard <mutex> lock(pool_mutex);
+                  new_subset_sums[sz].swap(new_sums);
                   lower_merged[sz-1] = upper_merged[sz] = true;
                   if (lower_merged[sz-1] && upper_merged[sz-1]) {
                       subset_sums[sz-1].clear();

@@ -97,10 +97,11 @@ static const uint64_t S_4_denom = 17297280;
  * of |S_5| = 1.1e11, making the average gap size 80. So we expect
  * (hope? wish?) that most of the gaps will fit in 1 byte.
  */
+template <typename byte_vector = vector <uint8_t>>
 struct IntSet {
     typedef uint64_t value_type;
 
-    vector <uint8_t> stream_;
+    byte_vector stream_;
     size_t size_;
     value_type max_;
 
@@ -216,34 +217,91 @@ struct IntSet {
 };
 
 /*
- * Chunked version of IntSet. Avoids memory allocation issues
+ * Chunked version of IntSet. Avoids memory (re-)allocation issues
  * for very large sets.
  */
-struct ChunkedIntSet {
-    typedef IntSet::value_type value_type;
+// Lightweight vector with fixed size
+struct byte_chunk {
+    typedef uint8_t value_type;
+    static const size_t chunk_size_ = 65000; // ~ 64KiB
 
-    list <IntSet> chunks_;
+    unique_ptr <array <value_type, chunk_size_>> array_;
     size_t size_;
 
-    /* chunk_size_ is used in the following way:
-     * Once the current chunk has surpassed chunk_size_, it continues
-     * to be used up to its current capacity() - 8. The -8 term is
-     * because storing the next value could require up to 9 bytes. */
-    // 512K — gcc's resize policy typically rounds up to 1M
-    static const size_t chunk_size_ = 1 << 19;
+    byte_chunk():
+        array_(new array <value_type, chunk_size_> ()),
+        size_(0) {
+    }
+    byte_chunk(const byte_chunk& v):
+        array_(new array <value_type, chunk_size_> (*v.array_)),
+        size_(v.size_) {
+    }
+    byte_chunk(byte_chunk&& v):
+        array_(v.array_.release()), size_(v.size_) {
+    }
+    byte_chunk& operator=(const byte_chunk& v) {
+        array_.reset(new array <value_type, chunk_size_> (*v.array_));
+        size_ = v.size_;
+        return *this;
+    }
+    byte_chunk& operator=(byte_chunk&& v) {
+        array_.reset(v.array_.release());
+        size_ = v.size_;
+        return *this;
+    }
+    ~byte_chunk() = default;
+
+    void push_back(value_type v) {
+        (*array_)[size_++] = v;
+    }
+    void pop_back(value_type v) {
+        --size_;
+    }
+    value_type& back() {
+        return operator[](size_ - 1);
+    }
+    value_type back() const {
+        return operator[](size_ - 1);
+    }
+    value_type& operator[](size_t i) {
+        return (*array_)[i];
+    }
+    value_type operator[](size_t i) const {
+        return (*array_)[i];
+    }
+    size_t size() const {
+        return size_;
+    }
+    size_t capacity() const {
+        return chunk_size_;
+    }
+    void swap(byte_chunk& v) {
+        array_.swap(v.array_);
+        std::swap(size_, v.size_);
+    }
+};
+struct ChunkedIntSet {
+    typedef IntSet <byte_chunk>::value_type value_type;
+
+    list <IntSet <byte_chunk>> chunks_;
+    size_t size_;
+
+    /* We use up to chunk_size_ - (value_size_ - 1) bytes of each chunk.
+     * This is to avoid having to deal with overrunning the space in
+     * each chunk when inserting. */
+    static const size_t chunk_size_ = byte_chunk::chunk_size_;
     static const size_t value_size_ = 9;
 
     struct iterator {
-        list <IntSet>::const_iterator chunk_iter_, chunks_end_;
-        IntSet::iterator val_iter_, vals_end_;
+        list <IntSet <byte_chunk>>::const_iterator chunk_iter_, chunks_end_;
+        IntSet <byte_chunk>::iterator val_iter_, vals_end_;
 
         iterator() = default;
         iterator(const ChunkedIntSet& set):
-            chunk_iter_(set.chunks_.begin()), chunks_end_(set.chunks_.end()),
-            val_iter_(chunk_iter_->begin()), vals_end_(chunk_iter_->end()) {
-            if (val_iter_ == vals_end_) {
-                // set is empty
-                chunk_iter_ = chunks_end_;
+            chunk_iter_(set.chunks_.begin()), chunks_end_(set.chunks_.end()) {
+            if (chunk_iter_ != chunks_end_) {
+                val_iter_ = chunk_iter_->begin();
+                vals_end_ = chunk_iter_->end();
             }
         }
         iterator& operator=(const iterator&) = default;
@@ -277,7 +335,7 @@ struct ChunkedIntSet {
     };
 
     ChunkedIntSet():
-        chunks_({ IntSet() }), size_(0) {
+        chunks_(), size_(0) {
     }
     ChunkedIntSet(const ChunkedIntSet&) = default;
     ChunkedIntSet(ChunkedIntSet&&) = default;
@@ -286,13 +344,14 @@ struct ChunkedIntSet {
     ~ChunkedIntSet() = default;
 
     void push_back(value_type v) {
-        IntSet* curr_set = &chunks_.back();
-        if (unlikely(curr_set->space() + value_size_ > curr_set->capacity() &&
-                     curr_set->capacity() > chunk_size_)) {
-            chunks_.push_back(IntSet());
-            curr_set = &chunks_.back();
+        if (unlikely(chunks_.empty() ||
+                     chunks_.back().space() + value_size_ > chunk_size_)) {
+            IntSet <byte_chunk> new_chunk;
+            new_chunk.push_back(v);
+            chunks_.emplace_back(new_chunk);
+        } else {
+            chunks_.back().push_back(v);
         }
-        curr_set->push_back(v);
         ++size_;
     }
     size_t size() const {
@@ -308,14 +367,14 @@ struct ChunkedIntSet {
     }
     size_t space() const {
         size_t t = 0;
-        for (const IntSet& chunk : chunks_) {
+        for (const IntSet <byte_chunk>& chunk : chunks_) {
             t += chunk.space();
         }
         return t;
     }
     size_t capacity() const {
         size_t t = 0;
-        for (const IntSet& chunk : chunks_) {
+        for (const IntSet <byte_chunk>& chunk : chunks_) {
             t += chunk.capacity();
         }
         return t;
@@ -333,17 +392,16 @@ struct ChunkedIntSet {
     // This frees up memory as the set is traversed.
     struct wicked_iterator {
         ChunkedIntSet* set_;
-        list <IntSet>::iterator chunk_iter_, chunks_end_;
-        IntSet::iterator val_iter_, vals_end_;
+        list <IntSet <byte_chunk>>::iterator chunk_iter_, chunks_end_;
+        IntSet <byte_chunk>::iterator val_iter_, vals_end_;
 
         wicked_iterator() = default;
         wicked_iterator(ChunkedIntSet& set):
             set_(&set),
-            chunk_iter_(set.chunks_.begin()), chunks_end_(set.chunks_.end()),
-            val_iter_(chunk_iter_->begin()), vals_end_(chunk_iter_->end()) {
-            if (val_iter_ == vals_end_) {
-                // set is empty
-                chunk_iter_ = chunks_end_;
+            chunk_iter_(set.chunks_.begin()), chunks_end_(set.chunks_.end()) {
+            if (chunk_iter_ != chunks_end_) {
+                val_iter_ = chunk_iter_->begin();
+                vals_end_ = chunk_iter_->end();
             }
         }
         wicked_iterator& operator=(const wicked_iterator&) = default;
@@ -549,7 +607,7 @@ uint64_t list_S5(const set <mpq_class>& S_4)
 
         // Print stats
         size_t size = 0, mem = 0;
-        for (size_t i = 1; i <= iter; ++i) {
+        for (size_t i = 1; i < subset_sums.size(); ++i) {
             size += subset_sums[i].size();
             mem += subset_sums[i].capacity();
         }

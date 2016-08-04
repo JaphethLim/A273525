@@ -624,6 +624,31 @@ uint64_t list_S5(const set <mpq_class>& S_4)
         }
         DEBUG_MORE("\n");
 
+#ifndef ROCKET
+        // Print gap distribution stats every few iterations
+        if (iter % 5 == 0) {
+            DEBUG("Gap distribution stats:");
+            array <size_t, 65> gaps = {};
+            for (size_t sz = 1; sz <= iter; ++sz) {
+                uint64_t prev = 0;
+                for (uint64_t x: subset_sums[sz]) {
+                    if (prev) {
+                        size_t bits = 0;
+                        for (; bits < 64 && (x - prev) >> bits; ++bits);
+                        ++gaps[bits];
+                    }
+                    prev = x;
+                }
+            }
+            for (size_t bits = 0; bits < gaps.size(); ++bits) {
+                if (gaps[bits]) {
+                    DEBUG_MORE(" 2^%zu=%zu", bits, gaps[bits]);
+                }
+            }
+            DEBUG_MORE("\n");
+        }
+#endif
+
         if (false) {
             // Print everything
             DEBUG("Subset sums:\n");

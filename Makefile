@@ -1,11 +1,14 @@
 CXXFLAGS=-std=c++11 -Wall -O3 -march=native -fwhole-program
 LDFLAGS=-flto -lgmp -lgmpxx -lpthread
 
+A273525-rocket: A273525.cpp
+	g++ $< -o $@ -DROCKET $(CXXFLAGS) $(LDFLAGS)
+
 A273525: A273525.cpp
-	g++ A273525.cpp -o A273525 $(CXXFLAGS) $(LDFLAGS)
+	g++ $< -o $@ $(CXXFLAGS) $(LDFLAGS)
 
 clean:
-	rm A273525
+	rm -f A273525 A273525-rocket
 
 test: A273525
 	./A273525 -t intset

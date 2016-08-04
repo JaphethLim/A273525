@@ -8,7 +8,6 @@
  * This program calculates a_5.
  */
 
-#include <cassert>
 #include <cstdio>
 #include <cinttypes>
 #include <cmath>
@@ -23,6 +22,12 @@
 #include <queue>
 #include <gmpxx.h>
 #include <getopt.h>
+
+#ifdef ROCKET
+# define assert(...) (void)0
+#else
+# include <cassert>
+#endif
 
 #ifdef __GNUC__
 # define likely(x) __builtin_expect(x, 1)

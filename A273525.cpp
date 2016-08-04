@@ -601,10 +601,6 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                 for (ChunkedIntSet::wicked_iterator i = subset_sums[sz].wicked_begin();
                      i != subset_sums[sz].wicked_end(); ++i) {
                     uint64_t x = *i;
-                    if (x == 0 && sz > 1) {
-                        // These were fake entries we added earlier
-                        continue;
-                    }
                     uint64_t d = gcd(x, sz);
                     denom_subgroups[sz / d].push_back(x / d);
                 }

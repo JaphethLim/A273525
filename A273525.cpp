@@ -115,7 +115,11 @@ struct IntSet {
     // Conservative guess used by push_back and ChunkedIntSet
     // Note that log C(2^64, 128) < 934 bytes so we should be safe
     static const size_t enc_buffer_size_ = buffer_size_ * 8;
+    // Block size for 2-pass prefix sum
+    static const size_t prefix_sum_block_ = 8;
 
+    // stream_ only contains full buffer_size_ blocks, partial blocks
+    // are always left in buffer_
     vector <uint8_t> stream_;
     size_t stream_size_; // number of values in stream
     array <value_type, buffer_size_> buffer_;
@@ -139,9 +143,7 @@ struct IntSet {
                     p4ddec64(const_cast <uint8_t*> (&set.stream_[stream_pos_]),
                              buffer_size_, &buffer_[0])
                      - &set.stream_[0];
-                for (size_t i = 1; i < buffer_size_; ++i) {
-                    buffer_[i] += buffer_[i-1];
-                }
+                prefix_sum_(0);
                 buffer_pos_ = 0;
             }
         }
@@ -156,10 +158,7 @@ struct IntSet {
                         p4ddec64(const_cast <uint8_t*> (&set_->stream_[stream_pos_]),
                                  buffer_size_, &buffer_[0])
                          - &set_->stream_[0];
-                    buffer_[0] += prev;
-                    for (size_t i = 1; i < buffer_size_; ++i) {
-                        buffer_[i] += buffer_[i-1];
-                    }
+                    prefix_sum_(prev);
                     buffer_pos_ = 0;
                 }
             } else {
@@ -180,6 +179,29 @@ struct IntSet {
         bool operator!=(const iterator& it) const {
             return !operator==(it);
         }
+
+        void prefix_sum_(value_type initial) {
+            buffer_[0] += initial;
+            if (true) {
+                for (size_t i = 1; i < buffer_size_; ++i) {
+                    buffer_[i] += buffer_[i - 1];
+                }
+            } else {
+                for (size_t i = 1; i < prefix_sum_block_ && i < buffer_size_; ++i) {
+                    buffer_[i] += buffer_[i - 1];
+                }
+                for (size_t b = prefix_sum_block_; b < buffer_size_; b += prefix_sum_block_) {
+                    for (size_t i = 1; i < prefix_sum_block_ && i < buffer_size_ - b; ++i) {
+                        buffer_[b + i] += buffer_[b + i - 1];
+                    }
+                }
+                for (size_t b = prefix_sum_block_; b < buffer_size_; b += prefix_sum_block_) {
+                    for (size_t i = 0; i < prefix_sum_block_ && i < buffer_size_ - b; ++i) {
+                        buffer_[b + i] += buffer_[b - 1];
+                    }
+                }
+            }
+        }
     };
 
     IntSet():
@@ -194,20 +216,21 @@ struct IntSet {
     void push_back(value_type v) {
         buffer_[pending_++] = v;
         if (pending_ == buffer_size_) {
+            // Do delta encoding out-of-place for better (?) parallelism
+            array <value_type, buffer_size_> buffer_gaps;
+            buffer_gaps[0] = buffer_[0] - max_;
+            for (size_t i = 1; i < buffer_size_; ++i) {
+                buffer_gaps[i] = buffer_[i] - buffer_[i-1];
+            }
             // Be extra careful here
             uint8_t buf[enc_buffer_size_ + 100];
-            uint64_t new_max = buffer_.back();
-            for (size_t i = buffer_size_ - 1; i > 0; --i) {
-                buffer_[i] -= buffer_[i-1];
-            }
-            buffer_[0] -= max_;
-            uint8_t* buf_end = p4denc64(&buffer_[0], buffer_size_, buf);
+            uint8_t* buf_end = p4denc64(&buffer_gaps[0], buffer_size_, buf);
             // Check our original bound
             assert (buf_end - buf < ssize_t(enc_buffer_size_));
             stream_.insert(stream_.end(), buf, buf_end);
             stream_size_ += pending_;
             pending_ = 0;
-            max_ = new_max;
+            max_ = buffer_.back();
         }
     }
     size_t size() const {

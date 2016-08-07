@@ -720,34 +720,164 @@ uint64_t list_S5(const set <mpq_class>& S_4)
     size_t S_5_size = 0;
 
     {
-        // Worker threads do double duty here: they split the subset
-        // averages according to their true (reduced) denominators;
-        // they also merge and count subset averages for a given denom
-        // when all the averages have been collected for that denom.
+        /* Worker threads do double duty here: they split the subset
+         * averages according to their true (reduced) denominators;
+         * they also merge and count subset averages for a given denom
+         * when all the averages have been collected for that denom. */
         mutex pool_mutex;
         // Each subset_sums[sz] is also used to generate the symmetric
         // subset_sums[S_4_size - sz]. We'd like to free it as soon as
         // both are done.
-        vector <unsigned> pending_splits(S_4_size + 1, 2);
+        vector <unsigned> pending_splits(S_4.size() + 1, 2);
         if (S_4.size() % 2 == 0) {
             pending_splits[S_4.size() / 2] = 1;
         }
-        // Schedule pairs of jobs for each subset_sums[sz] so that it
-        // can be freed early.
+
+        /* We schedule pairs of sizes (sz, S_4_size - sz) together so
+         * that the underlying subset_sums[sz] can be freed right away.
+         *
+         * Since the collection phase expands the [S_4_size-sz] values
+         * and creates multiple subsets for each denominator, it is
+         * the phase that consumes the most memory. Hence, we do a
+         * little optimisation to find a schedule that reduces the
+         * peak memory usage. */
         vector <size_t> extract_jobs;
-        for (size_t i = 0; i <= S_4.size() - i; ++i) {
-            if (i > 0) {
-                extract_jobs.push_back(i);
+        {
+            /*
+             * We model the memory cost like this:
+             *
+             * When collecting a given subset_sums[sz], we assume that
+             * the number of resulting averages with denominator d is
+             *   avg.size ≈ subset_sums[sz].size * φ(d)/sz
+             * (φ is the totient function), i.e. the sums are “well
+             * distributed”. The memory cost is estimated as
+             *   avg.size * log_2(subset_sums[sz].size / avg.size)
+             * to account for the compressed IntSet encoding.
+             *
+             * Finally, we assume that the schedule is executed
+             * by a single thread in sequence. Then we just swap
+             * some entries in the schedule to (locally) optimise
+             * the total memory usage.
+             */
+            vector <pair <size_t, size_t>> extract_pairs;
+            for (size_t i = 0; i <= S_4.size() - i; ++i) {
+                extract_pairs.push_back(make_pair(i, S_4.size() - i));
             }
-            if (S_4.size() - i > i) {
-                extract_jobs.push_back(S_4.size() - i);
+
+            vector <size_t> phi(S_4.size() + 1);
+            for (size_t n = 1; n <= S_4.size(); ++n) {
+                for (size_t d = 1; d <= n; ++d) {
+                    if (gcd(n, d) == 1) {
+                        ++phi[n];
+                    }
+                }
             }
+            vector <vector <size_t>> divisors_of(S_4.size() + 1);
+            for (size_t n = 1; n <= S_4.size(); ++n) {
+                for (size_t d = 1; d <= n; ++d) {
+                    if (n % d == 0) {
+                        divisors_of[n].push_back(d);
+                    }
+                }
+            }
+            vector <size_t> split_deps0(S_4.size() + 1);
+            for (size_t n = 1; n <= S_4.size(); ++n) {
+                split_deps0[n] = S_4.size() / n;
+            }
+            auto memory_cost = [&]() -> pair <size_t, size_t> {
+                size_t current_cost = 0;
+                for (const ChunkedIntSet& set: subset_sums) {
+                    current_cost += set.capacity();
+                }
+                size_t peak_cost = current_cost, total_cost = 0;
+                vector <size_t> denom_costs(S_4.size() + 1);
+                vector <size_t> split_deps = split_deps0;
+                vector <bool> has_merged(S_4.size() + 1);
+                auto sim_split = [&](size_t sz) {
+                    for (size_t d: divisors_of[sz]) {
+                        size_t subgroup_size = subset_sums[sz].size() * phi[d] / sz;
+                        size_t subgroup_mem = 0;
+                        if (subgroup_size) {
+                            subgroup_mem = subgroup_size *
+                              (1 + log(double(subset_sums[sz].size()) / subgroup_size) / log(2)) / 8;
+                        }
+                        denom_costs[d] += subgroup_mem;
+                        current_cost += subgroup_mem;
+                        --split_deps[d];
+                    }
+                    current_cost -= subset_sums[sz].capacity();
+                };
+                auto sim_merge = [&](size_t last_split) {
+                    for (size_t denom: divisors_of[last_split]) {
+                        if (!has_merged[denom] && split_deps[denom] == 0) {
+                            current_cost -= denom_costs[denom];
+                            has_merged[denom] = true;
+                        }
+                    }
+                };
+                for (size_t i = 0; i < extract_pairs.size(); ++i) {
+                    sim_split(extract_pairs[i].first);
+                    peak_cost = max(current_cost, peak_cost);
+                    total_cost += current_cost;
+                    sim_merge(i);
+                    if (extract_pairs[i].second != extract_pairs[i].first) {
+                        sim_split(extract_pairs[i].second);
+                        peak_cost = max(current_cost, peak_cost);
+                        total_cost += current_cost;
+                        sim_merge(i);
+                    }
+                }
+                return make_pair(peak_cost, total_cost);
+            };
+            DEBUG("Optimising collect schedule...\n");
+            pair <size_t, size_t> cost = memory_cost();
+            // sort-of greedy optimisation
+            for (size_t tries = 1; tries < S_4.size(); ++tries) {
+                DEBUG("  pass %zu\n", tries);
+                bool changed = false;
+                for (size_t i = 0; i < extract_pairs.size(); ++i) {
+                    size_t best_swap = i;
+                    pair <size_t, size_t> best_cost = cost;
+                    for (size_t j = i + 1; j < extract_pairs.size(); ++j) {
+                        std::swap(extract_pairs[i], extract_pairs[j]);
+                        pair <size_t, size_t> new_cost = memory_cost();
+                        if (new_cost < best_cost) {
+                            best_cost = new_cost;
+                            best_swap = j;
+                        }
+                        std::swap(extract_pairs[i], extract_pairs[j]);
+                    }
+                    if (best_swap != i) {
+                        changed = true;
+                        std::swap(extract_pairs[i], extract_pairs[best_swap]);
+                        cost = best_cost;
+                    }
+                }
+                if (!changed) {
+                    break;
+                }
+            }
+
+            for (pair <size_t, size_t> p: extract_pairs) {
+                if (p.first != 0) {
+                    extract_jobs.push_back(p.first);
+                }
+                if (p.second != 0 && p.second != p.first) {
+                    extract_jobs.push_back(p.second);
+                }
+            }
+            DEBUG("Collect schedule, estimated cost=%zu:", cost.first);
+            for (size_t sz: extract_jobs) {
+                DEBUG_MORE(" %zu", sz);
+            }
+            DEBUG_MORE("\n");
+            // Our workers take jobs back-to-front
+            reverse(extract_jobs.begin(), extract_jobs.end());
         }
+
         // This is used to keep track of which denoms have completely
         // finished, so we can merge and count them sooner
         vector <bool> extract_done(S_4.size() + 1);
-        // To help this, we schedule the largest denoms first
-        reverse(extract_jobs.begin(), extract_jobs.end());
 
         auto larger_group = [&](const list <ChunkedIntSet>::iterator& i1,
                                 const list <ChunkedIntSet>::iterator& i2) {

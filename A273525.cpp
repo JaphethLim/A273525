@@ -678,7 +678,7 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                           sz, mem / 1024);
                     for (size_t i = 0; i < denom_subgroups.size(); ++i) {
                         if (denom_subgroups[i].size()) {
-                            DEBUG_MORE(" %zu", denom_subgroups[i].size());
+                            DEBUG_MORE(" %zu=%zu", i, denom_subgroups[i].size());
                             denom_groups[i].emplace_back(move(denom_subgroups[i]));
                         }
                     }
@@ -1024,5 +1024,6 @@ int main(int argc, char** argv)
         }
     }
 
-    list_S5(S_4);
+    // default action
+    printf("|S_5| = %zu\n", list_S5(S_4));
 }

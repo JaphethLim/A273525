@@ -713,8 +713,17 @@ uint64_t list_S5(const set <mpq_class>& S_4)
      * each d_i. Note that each subsequence is still sorted.
      */
     vector <list <ChunkedIntSet>> denom_groups(subset_sums.size());
+    /*
+     * Merge and count (and then delete) sequences for each denominator.
+     * This is interleaved with the above
+     */
+    size_t S_5_size = 0;
+
     {
-        // We farm out the extraction of subsequences to threads.
+        // Worker threads do double duty here: they split the subset
+        // averages according to their true (reduced) denominators;
+        // they also merge and count subset averages for a given denom
+        // when all the averages have been collected for that denom.
         mutex pool_mutex;
         // Each subset_sums[sz] is also used to generate the symmetric
         // subset_sums[S_4_size - sz]. We'd like to free it as soon as
@@ -723,8 +732,8 @@ uint64_t list_S5(const set <mpq_class>& S_4)
         if (S_4.size() % 2 == 0) {
             pending_splits[S_4.size() / 2] = 1;
         }
-        // Schedule pairs of jobs for each subset_sums so that it can
-        // be freed early.
+        // Schedule pairs of jobs for each subset_sums[sz] so that it
+        // can be freed early.
         vector <size_t> extract_jobs;
         for (size_t i = 0; i <= S_4.size() - i; ++i) {
             if (i > 0) {
@@ -734,76 +743,194 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                 extract_jobs.push_back(S_4.size() - i);
             }
         }
+        // This is used to keep track of which denoms have completely
+        // finished, so we can merge and count them sooner
+        vector <bool> extract_done(S_4.size() + 1);
+        // To help this, we schedule the largest denoms first
+        reverse(extract_jobs.begin(), extract_jobs.end());
+
+        auto larger_group = [&](const list <ChunkedIntSet>::iterator& i1,
+                                const list <ChunkedIntSet>::iterator& i2) {
+            return i1->size() > i2->size();
+        };
+        vector <bool> pending_merges(S_4.size() + 1, true);
+
         auto worker = [&]() {
             for (;;) {
-                size_t sz;
+                bool is_merge_job = false;
+                size_t job_num;
                 {   lock_guard <mutex> lock(pool_mutex);
-                    if (extract_jobs.empty()) {
-                        return;
+                    // Find pending denoms that we can merge now.
+                    // Every denom eventually becomes eligible once its
+                    // multiples have been collected by other jobs, so
+                    // this algorithm is complete.
+                    for (job_num = 1; job_num <= S_4.size(); ++job_num) {
+                        if (!pending_merges[job_num]) continue;
+                        bool can_merge = true;
+                        for (size_t mul = 1; job_num * mul <= S_4.size(); ++mul) {
+                            if (!extract_done[job_num * mul]) {
+                                can_merge = false;
+                            }
+                        }
+                        if (can_merge) {
+                            is_merge_job = true;
+                            pending_merges[job_num] = false;
+                            break;
+                        }
                     }
-                    sz = extract_jobs.back();
-                    extract_jobs.pop_back();
+
+                    if (!is_merge_job) {
+                        if (extract_jobs.empty()) {
+                            return;
+                        }
+                        job_num = extract_jobs.back();
+                        extract_jobs.pop_back();
+                    }
                 }
-                vector <ChunkedIntSet> denom_subgroups(denom_groups.size());
-                if (sz <= S_4.size() / 2) {
-                    // Split subset_sums by reduced denominators
-                    for (ChunkedIntSet::iterator i = subset_sums[sz].begin();
-                         i != subset_sums[sz].end(); ++i) {
-                        uint64_t x = *i;
-                        uint64_t d = gcd(x, sz);
-                        denom_subgroups[sz / d].push_back(x / d);
+
+                if (is_merge_job) {
+                    // Merge averages for denom
+                    size_t denom = job_num;
+                    // The subsequences have varying sizes; we use a
+                    // priority_queue to merge the smallest pair first.
+                    priority_queue <list <ChunkedIntSet>::iterator,
+                                    vector <list <ChunkedIntSet>::iterator>,
+                                    decltype(larger_group)>
+                        merge_queue(larger_group);
+                    for (list <ChunkedIntSet>::iterator i = denom_groups[denom].begin();
+                         i != denom_groups[denom].end(); ++i) {
+                        merge_queue.push(i);
+                    }
+                    while (merge_queue.size() > 1) {
+                        list <ChunkedIntSet>::iterator group1 = merge_queue.top();
+                        merge_queue.pop();
+                        list <ChunkedIntSet>::iterator group2 = merge_queue.top();
+                        merge_queue.pop();
+                        // Merge group1 and group2 into a new set, then store it in group1
+                        ChunkedIntSet merged_group;
+                        ChunkedIntSet::wicked_iterator i1 = group1->wicked_begin(),
+                        i2 = group2->wicked_begin();
+                        for (;;) {
+                            if (unlikely(i1 == group1->wicked_end())) {
+                                if (unlikely(i2 == group2->wicked_end())) {
+                                    break;
+                                } else {
+                                    merged_group.push_back(*i2);
+                                    ++i2;
+                                }
+                            } else if (unlikely(i2 == group2->wicked_end())) {
+                                merged_group.push_back(*i1);
+                                ++i1;
+                            } else if (*i1 < *i2) {
+                                merged_group.push_back(*i1);
+                                ++i1;
+                            } else if (*i2 < *i1) {
+                                merged_group.push_back(*i2);
+                                ++i2;
+                            } else {
+                                merged_group.push_back(*i1);
+                                ++i1, ++i2;
+                            }
+                        }
+                        group1->swap(merged_group);
+                        // *group2 is now empty. denom_group[denom] is a list
+                        // so we can safely erase group2
+                        denom_groups[denom].erase(group2);
+                        // Continue merging
+                        merge_queue.push(group1);
+                    }
+                    assert (denom_groups[denom].size() <= 1);
+
+                    {   lock_guard <mutex> lock(pool_mutex);
+                        size_t denom_count = 0, mem = 0;
+                        if (!denom_groups[denom].empty()) {
+                            denom_count += denom_groups[denom].begin()->size();
+                            mem += denom_groups[denom].begin()->capacity();
+                        }
+                        DEBUG("Merged denominator %zu: %zu elems, mem = %zu K\n",
+                              denom, denom_count, mem / 1024);
+
+                        if (false) {
+                            // Print everything
+                            if (!denom_groups[denom].empty()) {
+                                DEBUG("Elems:");
+                                for (uint64_t x: *denom_groups[denom].begin()) {
+                                    uint64_t d = gcd(x, denom * S_4_denom);
+                                    DEBUG_MORE(" %zu/%zu", x / d, denom * S_4_denom / d);
+                                }
+                                DEBUG_MORE("\n");
+                            }
+                        }
+                        S_5_size += denom_count;
+                        // We can now free the data for this denom
+                        denom_groups[denom].clear();
                     }
                 } else {
-                    // We skipped subset_sums[sz] for S_4_size/2 < sz <= S_4_size
-                    // due to symmetry. Now we need to go back and generate them.
-                    uint64_t S_4_sum = 0;
-                    for (uint64_t x: S_4_scaled) {
-                        S_4_sum += x;
-                    }
-                    // The values of subset_sum[sz] would be
-                    // S_4_sum - subset_sum[S_4_size - sz], but this list
-                    // is in reverse order. We fix this simplistically
-                    // by fully decoding each chunk and reversing it.
-                    // FIXME: this bypasses the ChunkedIntSet interface
-                    list <IntSet>::const_reverse_iterator ci;
-                    const ChunkedIntSet& shadow = subset_sums[S_4.size() - sz];
-                    // We can walk the chunks in reverse without difficulty.
-                    for (ci = shadow.chunks_.rbegin(); ci != shadow.chunks_.rend(); ++ci) {
-                        vector <uint64_t> chunk(ci->size());
-                        size_t i = ci->size() - 1;
-                        for (uint64_t nx: *ci) {
-                            chunk[i--] = S_4_sum - nx;
-                        }
-                        // Process the reversed chunk
-                        for (uint64_t x: chunk) {
+                    // Collect averages for subsets of given size
+                    size_t sz = job_num;
+                    vector <ChunkedIntSet> denom_subgroups(denom_groups.size());
+                    if (sz <= S_4.size() / 2) {
+                        // Split subset_sums by reduced denominators
+                        for (ChunkedIntSet::iterator i = subset_sums[sz].begin();
+                             i != subset_sums[sz].end(); ++i) {
+                            uint64_t x = *i;
                             uint64_t d = gcd(x, sz);
                             denom_subgroups[sz / d].push_back(x / d);
                         }
-                    }
-                }
-
-                // Return the results
-                {   lock_guard <mutex> lock(pool_mutex);
-                    size_t mem = 0;
-                    for (ChunkedIntSet& subgroup: denom_subgroups) {
-                        mem += subgroup.capacity();
-                    }
-                    DEBUG("Collected results for size %zu, mem = %zu K, sizes:",
-                          sz, mem / 1024);
-                    for (size_t i = 0; i < denom_subgroups.size(); ++i) {
-                        if (denom_subgroups[i].size()) {
-                            DEBUG_MORE(" %zu=%zu", i, denom_subgroups[i].size());
-                            denom_groups[i].emplace_back(move(denom_subgroups[i]));
+                    } else {
+                        // We skipped subset_sums[sz] for S_4_size/2 < sz <= S_4_size
+                        // due to symmetry. Now we need to go back and generate them.
+                        uint64_t S_4_sum = 0;
+                        for (uint64_t x: S_4_scaled) {
+                            S_4_sum += x;
+                        }
+                        // The values of subset_sum[sz] would be
+                        // S_4_sum - subset_sum[S_4_size - sz], but this list
+                        // is in reverse order. We fix this simplistically
+                        // by fully decoding each chunk and reversing it.
+                        // FIXME: this bypasses the ChunkedIntSet interface
+                        list <IntSet>::const_reverse_iterator ci;
+                        const ChunkedIntSet& shadow = subset_sums[S_4.size() - sz];
+                        // We can walk the chunks in reverse without difficulty.
+                        for (ci = shadow.chunks_.rbegin(); ci != shadow.chunks_.rend(); ++ci) {
+                            vector <uint64_t> chunk(ci->size());
+                            size_t i = ci->size() - 1;
+                            for (uint64_t nx: *ci) {
+                                chunk[i--] = S_4_sum - nx;
+                            }
+                            // Process the reversed chunk
+                            for (uint64_t x: chunk) {
+                                uint64_t d = gcd(x, sz);
+                                denom_subgroups[sz / d].push_back(x / d);
+                            }
                         }
                     }
-                    DEBUG_MORE("\n");
 
-                    size_t source_sz = sz;
-                    if (S_4.size() / 2 < sz) {
-                        source_sz = S_4.size() - sz;
-                    }
-                    if (--pending_splits[source_sz] == 0) {
-                        subset_sums[source_sz].clear();
+                    // Return the results
+                    {   lock_guard <mutex> lock(pool_mutex);
+                        size_t mem = 0;
+                        for (ChunkedIntSet& subgroup: denom_subgroups) {
+                            mem += subgroup.capacity();
+                        }
+                        DEBUG("Collected results for size %zu, mem = %zu K, sizes:",
+                              sz, mem / 1024);
+                        for (size_t i = 0; i < denom_subgroups.size(); ++i) {
+                            if (denom_subgroups[i].size()) {
+                                DEBUG_MORE(" %zu=%zu", i, denom_subgroups[i].size());
+                                denom_groups[i].emplace_back(move(denom_subgroups[i]));
+                            }
+                        }
+                        DEBUG_MORE("\n");
+
+                        size_t source_sz = sz;
+                        if (S_4.size() / 2 < sz) {
+                            source_sz = S_4.size() - sz;
+                        }
+                        if (--pending_splits[source_sz] == 0) {
+                            subset_sums[source_sz].clear();
+                        }
+
+                        extract_done[sz] = true;
                     }
                 }
             }
@@ -817,112 +944,10 @@ uint64_t list_S5(const set <mpq_class>& S_4)
             worker.join();
         }
         subset_sums.clear();
-    }
-    DEBUG("\n");
 
-    // Merge sequences for each denominator
-    size_t S_5_size = 0;
-    {
-        mutex pool_mutex;
-        vector <size_t> merge_jobs;
-        for (size_t i = 1; i < denom_groups.size(); ++i) {
-            merge_jobs.push_back(i);
-        }
-        auto larger_group = [&](const list <ChunkedIntSet>::iterator& i1,
-                                const list <ChunkedIntSet>::iterator& i2) {
-            return i1->size() > i2->size();
-        };
-        auto worker = [&]() {
-            for (;;) {
-                size_t denom;
-                {   lock_guard <mutex> lock(pool_mutex);
-                    if (merge_jobs.empty()) {
-                        return;
-                    }
-                    denom = merge_jobs.back();
-                    merge_jobs.pop_back();
-                }
-                // The subsequences have varying sizes; we use a
-                // priority_queue to merge the smallest pair first.
-                priority_queue <list <ChunkedIntSet>::iterator,
-                                vector <list <ChunkedIntSet>::iterator>,
-                                decltype(larger_group)>
-                    merge_queue(larger_group);
-                for (list <ChunkedIntSet>::iterator i = denom_groups[denom].begin();
-                     i != denom_groups[denom].end(); ++i) {
-                    merge_queue.push(i);
-                }
-                while (merge_queue.size() > 1) {
-                    list <ChunkedIntSet>::iterator group1 = merge_queue.top();
-                    merge_queue.pop();
-                    list <ChunkedIntSet>::iterator group2 = merge_queue.top();
-                    merge_queue.pop();
-                    // Merge group1 and group2 into a new set, then store it in group1
-                    ChunkedIntSet merged_group;
-                    ChunkedIntSet::wicked_iterator i1 = group1->wicked_begin(),
-                                                   i2 = group2->wicked_begin();
-                    for (;;) {
-                        if (unlikely(i1 == group1->wicked_end())) {
-                            if (unlikely(i2 == group2->wicked_end())) {
-                                break;
-                            } else {
-                                merged_group.push_back(*i2);
-                                ++i2;
-                            }
-                        } else if (unlikely(i2 == group2->wicked_end())) {
-                            merged_group.push_back(*i1);
-                            ++i1;
-                        } else if (*i1 < *i2) {
-                            merged_group.push_back(*i1);
-                            ++i1;
-                        } else if (*i2 < *i1) {
-                            merged_group.push_back(*i2);
-                            ++i2;
-                        } else {
-                            merged_group.push_back(*i1);
-                            ++i1, ++i2;
-                        }
-                    }
-                    group1->swap(merged_group);
-                    // *group2 is now empty. denom_group[denom] is a list
-                    // so we can safely erase group2
-                    denom_groups[denom].erase(group2);
-                    // Continue merging
-                    merge_queue.push(group1);
-                }
-
-                // Size for this denom
-                {   lock_guard <mutex> lock(pool_mutex);
-                    size_t denom_count = 0, mem = 0;
-                    if (!merge_queue.empty()) {
-                        denom_count += merge_queue.top()->size();
-                        mem += merge_queue.top()->capacity();
-                    }
-                    DEBUG("Merged denominator %zu: %zu elems, mem %zu K\n",
-                          denom, denom_count, mem / 1024);
-
-                    if (false) {
-                        // Print everything
-                        if (!merge_queue.empty()) {
-                            DEBUG("Elems:");
-                            for (uint64_t x: *merge_queue.top()) {
-                                uint64_t d = gcd(x, denom * S_4_denom);
-                                DEBUG_MORE(" %zu/%zu", x / d, denom * S_4_denom / d);
-                            }
-                            DEBUG_MORE("\n");
-                        }
-                    }
-                    S_5_size += denom_count;
-                }
-            }
-        };
-
-        vector <thread> worker_pool;
-        for (size_t i = 0; i < num_threads; ++i) {
-            worker_pool.emplace_back(thread(worker));
-        }
-        for (thread& worker : worker_pool) {
-            worker.join();
+        // We should have merged everything by now
+        for (size_t i = 1; i <= S_4.size(); ++i) {
+            assert (!pending_merges[i]);
         }
     }
     DEBUG("\n");

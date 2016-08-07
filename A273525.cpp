@@ -931,9 +931,11 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                                     vector <list <ChunkedIntSet>::iterator>,
                                     decltype(larger_group)>
                         merge_queue(larger_group);
+                    size_t orig_mem = 0;
                     for (list <ChunkedIntSet>::iterator i = denom_groups[denom].begin();
                          i != denom_groups[denom].end(); ++i) {
                         merge_queue.push(i);
+                        orig_mem += i->capacity();
                     }
                     while (merge_queue.size() > 1) {
                         list <ChunkedIntSet>::iterator group1 = merge_queue.top();
@@ -981,8 +983,8 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                             denom_count += denom_groups[denom].begin()->size();
                             mem += denom_groups[denom].begin()->capacity();
                         }
-                        DEBUG("Merged denominator %zu: %zu elems, mem = %zu K\n",
-                              denom, denom_count, mem / 1024);
+                        DEBUG("Merged denominator %zu: %zu elems, mem = %zu -> %zu K\n",
+                              denom, denom_count, orig_mem / 1024, mem / 1024);
 
                         if (false) {
                             // Print everything
@@ -1046,8 +1048,12 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                         for (ChunkedIntSet& subgroup: denom_subgroups) {
                             mem += subgroup.capacity();
                         }
-                        DEBUG("Collected results for size %zu, mem = %zu K, sizes:",
-                              sz, mem / 1024);
+                        size_t source_sz = sz;
+                        if (S_4.size() / 2 < sz) {
+                            source_sz = S_4.size() - sz;
+                        }
+                        DEBUG("Collected results for size %zu, mem = %zu -> %zu K, sizes:",
+                              sz, subset_sums[source_sz].capacity() / 1024, mem / 1024);
                         for (size_t i = 0; i < denom_subgroups.size(); ++i) {
                             if (denom_subgroups[i].size()) {
                                 DEBUG_MORE(" %zu=%zu", i, denom_subgroups[i].size());
@@ -1056,10 +1062,6 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                         }
                         DEBUG_MORE("\n");
 
-                        size_t source_sz = sz;
-                        if (S_4.size() / 2 < sz) {
-                            source_sz = S_4.size() - sz;
-                        }
                         if (--pending_splits[source_sz] == 0) {
                             subset_sums[source_sz].clear();
                         }

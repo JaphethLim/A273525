@@ -274,10 +274,16 @@ struct ChunkedIntSet {
     list <IntSet> chunks_;
     size_t size_;
 
-    /* We use up to chunk_size_ - buffer_size_enc_ bytes of each chunk.
+    /* We fill up to chunk_size_ - buffer_size_enc_ bytes of each chunk
+     * before we decide to move to a new chunk.
      * This is to avoid having to deal with overrunning the space in
-     * each chunk when inserting. */
-    static const size_t chunk_size_ = 1 << 19;
+     * each chunk when inserting.
+     *
+     * Note that the space usage of the list_S5 decode-reverse code can
+     * be a large (64/compressed size) multiple of the chunk size.
+     * For a (quite typical) compressed size of 1 bit/entry, we get
+     *   chunk_size_ * 2 (vector growth factor) * (64 / 1) = 16MiB */
+    static const size_t chunk_size_ = 1 << 17;
     static const size_t value_size_ = 9;
 
     struct iterator {
@@ -507,6 +513,12 @@ void test_IntSet() {
 static const unsigned num_threads = 4;
 uint64_t list_S5(const set <mpq_class>& S_4)
 {
+    // recalculate, for testing with sets other than S_4 itself
+    uint64_t S_4_denom = 1;
+    for (const mpq_class& x : S_4) {
+        assert (x.get_den().fits_ulong_p());
+        S_4_denom = lcm(S_4_denom, x.get_den().get_ui());
+    }
     vector <uint64_t> S_4_scaled;
     for (const mpq_class& x : S_4) {
         S_4_scaled.push_back(x.get_num().get_ui() * (S_4_denom / x.get_den().get_ui()));
@@ -520,20 +532,27 @@ uint64_t list_S5(const set <mpq_class>& S_4)
     for (size_t iter = 1; iter <= S_4.size(); ++iter) {
         uint64_t x = S_4_scaled[iter-1];
 
-        vector <ChunkedIntSet> new_subset_sums(iter + 1);
+        // Note that by symmetry, subset_sums[sz] are the same as
+        // sum(S_4) - subset_sums[iter - sz], so we only need to keep track
+        // of sizes up to iter/2.
+        size_t max_sz = iter / 2;
+        vector <ChunkedIntSet> new_subset_sums(max_sz + 1);
         // We farm out the per-sz merges to multiple threads.
         mutex pool_mutex;
         vector <size_t> merge_jobs;
-        for (size_t sz = 1; sz <= iter; ++sz) {
+        for (size_t sz = 1; sz <= max_sz; ++sz) {
             merge_jobs.push_back(sz);
         }
 
-        // Each subset_sums[i] is used in two merges, and we'd like to
-        // delete it after both are finished.
-        vector <bool> lower_merged(subset_sums.size()), upper_merged(subset_sums.size());
-        // Except for subset_sum[iter], which is only merged once.
-        // (So is subset_sum[0], but we never touch it.)
-        lower_merged[iter] = true;
+        // Each subset_sums[i] is used in 1-2 merges, and we'd like to
+        // delete it after they are finished.
+        vector <unsigned> pending_merges(max_sz + 1);
+        pending_merges[0] = 99; // only 1-2, but we don't want to free it
+        for (size_t i = 1; i + 1 < max_sz; ++i) {
+            pending_merges[i] = 2;
+        }
+        // the last set is only used in one merge
+        --pending_merges[max_sz];
 
         auto worker = [&]() {
             for (;;) {
@@ -549,10 +568,40 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                 // Merge {x+y | y in subset_sums[sz-1]} and subset_sums[sz]
                 // into new_subset_sums[sz].
                 ChunkedIntSet::iterator ix = subset_sums[sz-1].begin();
-                ChunkedIntSet::iterator i = subset_sums[sz].begin();
+                ChunkedIntSet mid_rev;
+                size_t right_merge = sz;
+                if (sz == max_sz) {
+                    if (iter % 2 == 0) {
+                        // If iter is even, subset_sums[max_sz] is empty because we
+                        // didn't compute it until now. Fortunately, by symmetry
+                        // it is equal to subset_sums[max_sz - 1].
+                        right_merge = sz - 1;
+                    }
+                    // We also need to negate the subsets, which involves
+                    // reversing the sum sequence
+                    uint64_t total_sum = 0;
+                    for (size_t i = 0; i + 1 < iter; ++i) {
+                        total_sum += S_4_scaled[i];
+                    }
+                    list <IntSet>::const_reverse_iterator ci;
+                    const ChunkedIntSet& shadow = subset_sums[right_merge];
+                    for (ci = shadow.chunks_.rbegin(); ci != shadow.chunks_.rend(); ++ci) {
+                        vector <uint64_t> chunk(ci->size());
+                        size_t i = ci->size();
+                        for (uint64_t nx: *ci) {
+                            chunk[--i] = total_sum - nx;
+                        }
+                        for (uint64_t x: chunk) {
+                            mid_rev.push_back(x);
+                        }
+                    }
+                }
+                const ChunkedIntSet& right_set =
+                    sz == max_sz? mid_rev : subset_sums[right_merge];
+                ChunkedIntSet::iterator i = right_set.begin();
                 ChunkedIntSet new_sums;
                 for (;;) {
-                    if (unlikely(i == subset_sums[sz].end())) {
+                    if (unlikely(i == right_set.end())) {
                         if (unlikely(ix == subset_sums[sz-1].end())) {
                             break;
                         } else {
@@ -578,12 +627,11 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                 // Done
                 { lock_guard <mutex> lock(pool_mutex);
                   new_subset_sums[sz].swap(new_sums);
-                  lower_merged[sz-1] = upper_merged[sz] = true;
-                  if (lower_merged[sz-1] && upper_merged[sz-1]) {
+                  if (--pending_merges[sz-1] == 0) {
                       subset_sums[sz-1].clear();
                   }
-                  if (lower_merged[sz] && upper_merged[sz]) {
-                      subset_sums[sz].clear();
+                  if (--pending_merges[right_merge] == 0) {
+                      subset_sums[right_merge].clear();
                   }
                 }
             }
@@ -596,7 +644,7 @@ uint64_t list_S5(const set <mpq_class>& S_4)
         for (thread& worker : worker_pool) {
             worker.join();
         }
-        for (size_t sz = 1; sz <= iter; ++sz) {
+        for (size_t sz = 1; sz <= max_sz; ++sz) {
             subset_sums[sz].swap(new_subset_sums[sz]);
         }
 
@@ -609,17 +657,18 @@ uint64_t list_S5(const set <mpq_class>& S_4)
         DEBUG("Done iter %zu (elem = %3zu/%3zu), size = %zu, mem = %zu K, subset sizes:",
               iter, x / gcd(x, S_4_denom), S_4_denom / gcd(x, S_4_denom),
               size, mem >> 10);
-        for (size_t i = 1; i <= iter; ++i) {
+        for (size_t i = 1; i <= max_sz; ++i) {
             DEBUG_MORE(" %zu", subset_sums[i].size());
         }
         DEBUG_MORE("\n");
 
 #ifndef ROCKET
-        // Print gap distribution stats every few iterations
+        // Print gap distribution stats every few iterations.
+        // This involves a full scan of the state
         if (iter % 5 == 0) {
             DEBUG("Gap distribution stats:");
             array <size_t, 65> gaps = {};
-            for (size_t sz = 1; sz <= iter; ++sz) {
+            for (size_t sz = 1; sz <= max_sz; ++sz) {
                 uint64_t prev = 0;
                 for (uint64_t x: subset_sums[sz]) {
                     if (prev) {
@@ -667,9 +716,23 @@ uint64_t list_S5(const set <mpq_class>& S_4)
     {
         // We farm out the extraction of subsequences to threads.
         mutex pool_mutex;
+        // Each subset_sums[sz] is also used to generate the symmetric
+        // subset_sums[S_4_size - sz]. We'd like to free it as soon as
+        // both are done.
+        vector <unsigned> pending_splits(S_4_size + 1, 2);
+        if (S_4.size() % 2 == 0) {
+            pending_splits[S_4.size() / 2] = 1;
+        }
+        // Schedule pairs of jobs for each subset_sums so that it can
+        // be freed early.
         vector <size_t> extract_jobs;
-        for (size_t i = 1; i < subset_sums.size(); ++i) {
-            extract_jobs.push_back(i);
+        for (size_t i = 0; i <= S_4.size() - i; ++i) {
+            if (i > 0) {
+                extract_jobs.push_back(i);
+            }
+            if (S_4.size() - i > i) {
+                extract_jobs.push_back(S_4.size() - i);
+            }
         }
         auto worker = [&]() {
             for (;;) {
@@ -682,15 +745,43 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                     extract_jobs.pop_back();
                 }
                 vector <ChunkedIntSet> denom_subgroups(denom_groups.size());
-                // Wicked iterator reallocates memory to the new subsequences
-                // (actually, they will use slightly more memory due to
-                // larger gap sizes and chunk fragmentation).
-                for (ChunkedIntSet::wicked_iterator i = subset_sums[sz].wicked_begin();
-                     i != subset_sums[sz].wicked_end(); ++i) {
-                    uint64_t x = *i;
-                    uint64_t d = gcd(x, sz);
-                    denom_subgroups[sz / d].push_back(x / d);
+                if (sz <= S_4.size() / 2) {
+                    // Split subset_sums by reduced denominators
+                    for (ChunkedIntSet::iterator i = subset_sums[sz].begin();
+                         i != subset_sums[sz].end(); ++i) {
+                        uint64_t x = *i;
+                        uint64_t d = gcd(x, sz);
+                        denom_subgroups[sz / d].push_back(x / d);
+                    }
+                } else {
+                    // We skipped subset_sums[sz] for S_4_size/2 < sz <= S_4_size
+                    // due to symmetry. Now we need to go back and generate them.
+                    uint64_t S_4_sum = 0;
+                    for (uint64_t x: S_4_scaled) {
+                        S_4_sum += x;
+                    }
+                    // The values of subset_sum[sz] would be
+                    // S_4_sum - subset_sum[S_4_size - sz], but this list
+                    // is in reverse order. We fix this simplistically
+                    // by fully decoding each chunk and reversing it.
+                    // FIXME: this bypasses the ChunkedIntSet interface
+                    list <IntSet>::const_reverse_iterator ci;
+                    const ChunkedIntSet& shadow = subset_sums[S_4.size() - sz];
+                    // We can walk the chunks in reverse without difficulty.
+                    for (ci = shadow.chunks_.rbegin(); ci != shadow.chunks_.rend(); ++ci) {
+                        vector <uint64_t> chunk(ci->size());
+                        size_t i = ci->size() - 1;
+                        for (uint64_t nx: *ci) {
+                            chunk[i--] = S_4_sum - nx;
+                        }
+                        // Process the reversed chunk
+                        for (uint64_t x: chunk) {
+                            uint64_t d = gcd(x, sz);
+                            denom_subgroups[sz / d].push_back(x / d);
+                        }
+                    }
                 }
+
                 // Return the results
                 {   lock_guard <mutex> lock(pool_mutex);
                     size_t mem = 0;
@@ -706,6 +797,14 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                         }
                     }
                     DEBUG_MORE("\n");
+
+                    size_t source_sz = sz;
+                    if (S_4.size() / 2 < sz) {
+                        source_sz = S_4.size() - sz;
+                    }
+                    if (--pending_splits[source_sz] == 0) {
+                        subset_sums[source_sz].clear();
+                    }
                 }
             }
         };

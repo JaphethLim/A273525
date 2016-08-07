@@ -279,7 +279,7 @@ struct ChunkedIntSet {
      * This is to avoid having to deal with overrunning the space in
      * each chunk when inserting.
      *
-     * Note that the space usage of the list_S5 decode-reverse code can
+     * Note that the space usage of the count_S5 decode-reverse code can
      * be a large (64/compressed size) multiple of the chunk size.
      * For a (quite typical) compressed size of 1 bit/entry, we get
      *   chunk_size_ * 2 (vector growth factor) * (64 / 1) = 16MiB */
@@ -511,7 +511,7 @@ void test_IntSet() {
  * Finally, we remove duplicates from the averages.
  */
 static const unsigned num_threads = 4;
-uint64_t list_S5(const set <mpq_class>& S_4)
+uint64_t count_S5(const set <mpq_class>& S_4)
 {
     // recalculate, for testing with sets other than S_4 itself
     uint64_t S_4_denom = 1;
@@ -1088,8 +1088,6 @@ uint64_t list_S5(const set <mpq_class>& S_4)
     }
     DEBUG("\n");
 
-    // FIXME: we only return the size; we don't bother returning the elements
-    // as promised in the header comment
     return S_5_size;
 }
 
@@ -1098,7 +1096,7 @@ uint64_t list_S5(const set <mpq_class>& S_4)
  * (Answer: 7508566125 unique sums)
  *
  * 7.5e9 is 75% of the theoretical range of 10e9 (S_4_denom * S_4_size).
- * This means that tricks like indexing the subset averages in list_S5
+ * This means that tricks like indexing the subset averages in count_S5
  * by rank are not going to help much.
  */
 void subset_sums_S5(const set <mpq_class>& S_4)
@@ -1267,9 +1265,9 @@ int main(int argc, char** argv)
                 test_IntSet();
                 return 0;
             } else if (!strcmp(optarg, "dryrun_s4")) {
-                // We expect that the list_S5 algorithm also works
+                // We expect that the count_S5 algorithm also works
                 // when used to calculate S_4.
-                size_t size = list_S5(S_3);
+                size_t size = count_S5(S_3);
                 if (size == S_4_size) {
                     printf("S_4 test passed.\n");
                     return 0;
@@ -1286,7 +1284,7 @@ int main(int argc, char** argv)
                     S_4_125.insert(x);
                     if (++i == 125) break;
                 }
-                size_t size = list_S5(S_4_125);
+                size_t size = count_S5(S_4_125);
                 const size_t expected = 33947876;
                 if (size == expected) {
                     printf("S_5/125 test passed.\n");
@@ -1308,5 +1306,5 @@ int main(int argc, char** argv)
     }
 
     // default action
-    printf("|S_5| = %zu\n", list_S5(S_4));
+    printf("|S_5| = %zu\n", count_S5(S_4));
 }

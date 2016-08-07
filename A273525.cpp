@@ -784,10 +784,14 @@ uint64_t list_S5(const set <mpq_class>& S_4)
             for (size_t n = 1; n <= S_4.size(); ++n) {
                 split_deps0[n] = S_4.size() / n;
             }
+            vector <size_t> sums_mem(S_4.size() + 1);
+            for (size_t sz = 1; sz <= S_4.size(); ++sz) {
+                sums_mem[sz] = subset_sums[sz].capacity();
+            }
             auto memory_cost = [&]() -> pair <size_t, size_t> {
                 size_t current_cost = 0;
-                for (const ChunkedIntSet& set: subset_sums) {
-                    current_cost += set.capacity();
+                for (size_t mem: sums_mem) {
+                    current_cost += mem;
                 }
                 size_t peak_cost = current_cost, total_cost = 0;
                 vector <size_t> denom_costs(S_4.size() + 1);
@@ -805,7 +809,7 @@ uint64_t list_S5(const set <mpq_class>& S_4)
                         current_cost += subgroup_mem;
                         --split_deps[d];
                     }
-                    current_cost -= subset_sums[sz].capacity();
+                    current_cost -= sums_mem[sz];
                 };
                 auto sim_merge = [&](size_t last_split) {
                     for (size_t denom: divisors_of[last_split]) {

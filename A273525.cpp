@@ -840,8 +840,8 @@ uint64_t count_S5(const set <mpq_class>& S_4)
             DEBUG("Optimising collect schedule...\n");
             pair <size_t, size_t> cost = memory_cost();
             // sort-of greedy optimisation
-            for (size_t tries = 1; tries < S_4.size(); ++tries) {
-                DEBUG("  pass %zu\n", tries);
+            for (size_t tries = 1; tries <= 8; ++tries) {
+                DEBUG("  pass %zu, cost = %zu\n", tries, cost.first);
                 bool changed = false;
                 for (size_t i = 0; i < extract_pairs.size(); ++i) {
                     size_t best_swap = i;

@@ -785,7 +785,7 @@ uint64_t count_S5(const set <mpq_class>& S_4)
                 split_deps0[n] = S_4.size() / n;
             }
             vector <size_t> sums_mem(S_4.size() + 1);
-            for (size_t sz = 1; sz <= S_4.size(); ++sz) {
+            for (size_t sz = 1; sz <= S_4.size() / 2; ++sz) {
                 sums_mem[sz] = subset_sums[sz].capacity();
             }
             auto memory_cost = [&]() -> pair <size_t, size_t> {
@@ -799,11 +799,15 @@ uint64_t count_S5(const set <mpq_class>& S_4)
                 vector <bool> has_merged(S_4.size() + 1);
                 auto sim_split = [&](size_t sz) {
                     for (size_t d: divisors_of[sz]) {
-                        size_t subgroup_size = subset_sums[sz].size() * phi[d] / sz;
+                        size_t sums_size = subset_sums[sz].size();
+                        if (sz > S_4.size() / 2) {
+                            sums_size = subset_sums[S_4.size() - sz].size();
+                        }
+                        size_t subgroup_size = sums_size * phi[d] / sz;
                         size_t subgroup_mem = 0;
                         if (subgroup_size) {
                             subgroup_mem = subgroup_size *
-                              (1 + log(double(subset_sums[sz].size()) / subgroup_size) / log(2)) / 8;
+                                (1 + log(double(sums_size) / subgroup_size) / log(2)) / 8;
                         }
                         denom_costs[d] += subgroup_mem;
                         current_cost += subgroup_mem;

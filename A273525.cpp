@@ -513,9 +513,10 @@ void test_IntSet() {
  * Finally, we obtain the averages by dividing each sum
  * by its corresponding size, then remove duplicates.
  */
-static const unsigned num_threads = 4;
-uint64_t count_S5(const set <mpq_class>& S_4)
+uint64_t count_S5(const set <mpq_class>& S_4, unsigned num_threads = 1)
 {
+    assert (num_threads > 0);
+
     // recalculate, for testing with sets other than S_4 itself
     uint64_t S_4_denom = 1;
     for (const mpq_class& x : S_4) {
@@ -1260,13 +1261,14 @@ int main(int argc, char** argv)
     }
 
     const char* usage =
-        "Usage: %1$s [-k 1..875]\n"
+        "Usage: %1$s [-k 1..875] [-j THREADS]\n"
         "       %1$s -t [intset|dryrun_s4]\n";
 
     unsigned restrict_to = S_4.size();
+    unsigned num_threads = 4;
 
     int opt;
-    while ((opt = getopt(argc, argv, "hk:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "hj:k:t:")) != -1) {
         switch (opt) {
         case 'h':
             printf(usage, argv[0]);
@@ -1290,6 +1292,13 @@ int main(int argc, char** argv)
             } else {
                 fprintf(stderr, "Error: no such test: %s\n", optarg);
                 return 1;
+            }
+            break;
+        case 'j':
+            {   char temp;
+                if (sscanf(optarg, "%u%c", &num_threads, &temp) != 1 || num_threads < 1) {
+                    fprintf(stderr, "Error: invalid value for -j: %s\n", optarg);
+                }
             }
             break;
         case 'k':

@@ -503,12 +503,15 @@ void test_IntSet() {
 }
 
 /*
- * Algorithm to compute S_5.
+ * Algorithm to compute |S_5|.
+ * (Answer: 603919253973)
+ *
  * We first rescale S_4 to the range [0, S_4_denom],
  * which makes all elements and subset sums integer.
  * Then we add one element at a time to a database of
  * known subset sums (and their sizes).
- * Finally, we remove duplicates from the averages.
+ * Finally, we obtain the averages by dividing each sum
+ * by its corresponding size, then remove duplicates.
  */
 static const unsigned num_threads = 4;
 uint64_t count_S5(const set <mpq_class>& S_4)
@@ -525,7 +528,7 @@ uint64_t count_S5(const set <mpq_class>& S_4)
     }
 
     vector <ChunkedIntSet> subset_sums(S_4.size() + 1);
-    // Ensure that we collect sums for 1-element sets {x}.
+    // Base case
     subset_sums[0].push_back(0);
 
     // Add each element to the known subset sums.
@@ -534,7 +537,7 @@ uint64_t count_S5(const set <mpq_class>& S_4)
 
         // Note that by symmetry, subset_sums[sz] are the same as
         // sum(S_4) - subset_sums[iter - sz], so we only need to keep track
-        // of sizes up to iter/2.
+        // of sizes up to iter/2. This saves nearly 1/2 time and memory.
         size_t max_sz = iter / 2;
         vector <ChunkedIntSet> new_subset_sums(max_sz + 1);
         // We farm out the per-sz merges to multiple threads.
@@ -566,7 +569,8 @@ uint64_t count_S5(const set <mpq_class>& S_4)
                     }
                 }
                 // Merge {x+y | y in subset_sums[sz-1]} and subset_sums[sz]
-                // into new_subset_sums[sz].
+                // into new_subset_sums[sz]. First we construct subset_sums[sz]
+                // if necessary.
                 ChunkedIntSet::iterator ix = subset_sums[sz-1].begin();
                 ChunkedIntSet mid_rev;
                 size_t right_merge = sz;
@@ -596,6 +600,7 @@ uint64_t count_S5(const set <mpq_class>& S_4)
                         }
                     }
                 }
+                // The actual merge.
                 const ChunkedIntSet& right_set =
                     sz == max_sz? mid_rev : subset_sums[right_merge];
                 ChunkedIntSet::iterator i = right_set.begin();
@@ -662,32 +667,6 @@ uint64_t count_S5(const set <mpq_class>& S_4)
         }
         DEBUG_MORE("\n");
 
-#ifndef ROCKET
-        // Print gap distribution stats every few iterations.
-        // This involves a full scan of the state
-        if (iter % 5 == 0) {
-            DEBUG("Gap distribution stats:");
-            array <size_t, 65> gaps = {};
-            for (size_t sz = 1; sz <= max_sz; ++sz) {
-                uint64_t prev = 0;
-                for (uint64_t x: subset_sums[sz]) {
-                    if (prev) {
-                        size_t bits = 0;
-                        for (; bits < 64 && (x - prev) >> bits; ++bits);
-                        ++gaps[bits];
-                    }
-                    prev = x;
-                }
-            }
-            for (size_t bits = 0; bits < gaps.size(); ++bits) {
-                if (gaps[bits]) {
-                    DEBUG_MORE(" 2^%zu=%zu", bits, gaps[bits]);
-                }
-            }
-            DEBUG_MORE("\n");
-        }
-#endif
-
         if (false) {
             // Print everything
             DEBUG("Subset sums:\n");
@@ -706,41 +685,31 @@ uint64_t count_S5(const set <mpq_class>& S_4)
     }
 
     /*
-     * Compute and collect the subset averages.
+     * Collect and count the subset averages.
      * Each sequence subset_sums[sz] = a1/sz, a2/sz...
-     * is already sorted; we reduce them to lowest terms i.e.
-     * a_i/sz = b_i/d_i, then group them into subsequences for
-     * each d_i. Note that each subsequence is still sorted.
+     * is already sorted; we reduce them to lowest terms (still scaled
+     * by S_4_denom), i.e.  a_i/sz = b_i/d_i, then split them by each d_i.
+     * Note that the subsequence for each d_i is still sorted.
      */
     vector <list <ChunkedIntSet>> denom_groups(subset_sums.size());
     /*
      * Merge and count (and then delete) sequences for each denominator.
-     * This is interleaved with the above
+     * We can begin merging d_i once we have collected the sums for
+     * all sizes that are multiples of d_i.
      */
     size_t S_5_size = 0;
 
     {
-        /* Worker threads do double duty here: they split the subset
-         * averages according to their true (reduced) denominators;
-         * they also merge and count subset averages for a given denom
-         * when all the averages have been collected for that denom. */
-        mutex pool_mutex;
-        // Each subset_sums[sz] is also used to generate the symmetric
-        // subset_sums[S_4_size - sz]. We'd like to free it as soon as
-        // both are done.
-        vector <unsigned> pending_splits(S_4.size() + 1, 2);
-        if (S_4.size() % 2 == 0) {
-            pending_splits[S_4.size() / 2] = 1;
-        }
-
-        /* We schedule pairs of sizes (sz, S_4_size - sz) together so
+        /* We collect pairs of sizes (sz, S_4_size - sz) together so
          * that the underlying subset_sums[sz] can be freed right away.
          *
-         * Since the collection phase expands the [S_4_size-sz] values
+         * Since the collection phase expands the [S_4_size-sz] sums
+         * which we previously represented implicitly by symmetry,
          * and creates multiple subsets for each denominator, it is
          * the phase that consumes the most memory. Hence, we do a
-         * little optimisation to find a schedule that reduces the
-         * peak memory usage. */
+         * little optimisation on the collection schedule, to merge
+         * per-denominator averages as soon as possible and reduce
+         * the peak memory usage. */
         vector <size_t> extract_jobs;
         {
             /*
@@ -883,8 +852,22 @@ uint64_t count_S5(const set <mpq_class>& S_4)
             reverse(extract_jobs.begin(), extract_jobs.end());
         }
 
+        /* Worker threads do double duty here: they split the subset
+         * averages according to their true (reduced) denominators;
+         * they also merge and count subset averages for a given denom
+         * when all the averages have been collected for that denom. */
+        mutex pool_mutex;
+        // Each subset_sums[sz] is also used to generate the symmetric
+        // subset_sums[S_4_size - sz]. We'd like to free it as soon as
+        // both are done.
+        vector <unsigned> pending_splits(S_4.size() + 1, 2);
+        if (S_4.size() % 2 == 0) {
+            pending_splits[S_4.size() / 2] = 1;
+        }
+
         // This is used to keep track of which denoms have completely
         // finished, so we can merge and count them sooner
+        // FIXME: should use split_deps0 from earlier, which is more elegant
         vector <bool> extract_done(S_4.size() + 1);
 
         auto larger_group = [&](const list <ChunkedIntSet>::iterator& i1,
@@ -931,6 +914,7 @@ uint64_t count_S5(const set <mpq_class>& S_4)
                     size_t denom = job_num;
                     // The subsequences have varying sizes; we use a
                     // priority_queue to merge the smallest pair first.
+                    // This guarantees O(n log n) merge time
                     priority_queue <list <ChunkedIntSet>::iterator,
                                     vector <list <ChunkedIntSet>::iterator>,
                                     decltype(larger_group)>
@@ -1092,6 +1076,29 @@ uint64_t count_S5(const set <mpq_class>& S_4)
     }
     DEBUG("\n");
 
+    /*
+     * FIXME: we should record the actual memory usage during collection.
+     * Python script to approximate from the debug logs:
+     *
+     * def collect_mem(log, mem):
+     *     for l in log:
+     *         if ' -> ' in l:
+     *             print ("%10d: %s" % (mem, l.strip()))
+     *         m = re.search(r'Merged denominator ([0-9]+).* ([0-9]+) -> ([0-9]+)', l)
+     *         if m:
+     *             n, frm, to = map(int, m.groups())
+     *             mem -= frm
+     *             continue
+     *         m = re.search(r'Collected results for size ([0-9]+).* ([0-9]+) -> ([0-9]+)', l)
+     *         if m:
+     *             n, frm, to = map(int, m.groups())
+     *             mem += to
+     *             if n > 875/2: # symmetry — only one copy freed
+     *                 mem -= frm
+     *             continue
+     *     return mem
+     */
+
     return S_5_size;
 }
 
@@ -1158,9 +1165,7 @@ void subset_sums_S5(const set <mpq_class>& S_4)
 }
 
 /*
- * Algorithm to estimate |S_5|. We use two estimation methods.
- *
- * Birthday sampling:
+ * Algorithm to estimate |S_5|. We use a birthday estimation method:
  *
  * We assume that picking a subset of S_4 at random will produce a
  * uniformly random average. (This is of course a complete lie.)

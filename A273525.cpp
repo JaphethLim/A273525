@@ -1260,11 +1260,13 @@ int main(int argc, char** argv)
     }
 
     const char* usage =
-        "Usage: %1$s\n"
+        "Usage: %1$s [-k 1..875]\n"
         "       %1$s -t [intset|dryrun_s4|dryrun_s5]\n";
 
+    unsigned restrict_to = S_4.size();
+
     int opt;
-    while ((opt = getopt(argc, argv, "ht:")) != -1) {
+    while ((opt = getopt(argc, argv, "hk:t:")) != -1) {
         switch (opt) {
         case 'h':
             printf(usage, argv[0]);
@@ -1308,6 +1310,14 @@ int main(int argc, char** argv)
                 return 1;
             }
             break;
+        case 'k':
+            {   char temp;
+                if (sscanf(optarg, "%u%c", &restrict_to, &temp) != 1 ||
+                    restrict_to < 1 || restrict_to > S_4.size()) {
+                    fprintf(stderr, "Error: invalid value for -k: %s\n", optarg);
+                }
+            }
+            break;
         default:
             fprintf(stderr, usage, argv[0]);
             return 1;
@@ -1315,5 +1325,15 @@ int main(int argc, char** argv)
     }
 
     // default action
-    printf("|S_5| = %zu\n", count_S5(S_4));
+    if (restrict_to == S_4.size()) {
+        printf("|S_5| = %zu\n", count_S5(S_4));
+    } else {
+        set <mpq_class> S_4_restrict;
+        size_t i = 0;
+        for (mpq_class x: S_4) {
+            S_4_restrict.insert(x);
+            if (++i == restrict_to) break;
+        }
+        printf("|S_5/%u| = %zu\n", restrict_to, count_S5(S_4_restrict));
+    }
 }

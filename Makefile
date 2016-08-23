@@ -1,6 +1,6 @@
 CXXFLAGS=-std=c++11 -Wall -O3 -march=native -fwhole-program
 LDFLAGS=-flto -lgmp -lgmpxx -lpthread
-TURBOPFOR=../TurboPFor
+TURBOPFOR=./TurboPFor
 TURBOPFOR_OBJS=bitpack.o bitpackv.o vp4dc.o vp4dd.o bitunpack.o bitunpackv.o bitutil.o
 TURBOPFOR_OBJLIBS=$(addprefix $(TURBOPFOR)/,$(TURBOPFOR_OBJS))
 

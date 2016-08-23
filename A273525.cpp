@@ -1261,7 +1261,7 @@ int main(int argc, char** argv)
 
     const char* usage =
         "Usage: %1$s [-k 1..875]\n"
-        "       %1$s -t [intset|dryrun_s4|dryrun_s5]\n";
+        "       %1$s -t [intset|dryrun_s4]\n";
 
     unsigned restrict_to = S_4.size();
 
@@ -1285,24 +1285,6 @@ int main(int argc, char** argv)
                 } else {
                     printf("S_4 test failed: expected %zu, got %zu\n",
                            S_4_size, size);
-                    return 1;
-                }
-            } else if (!strcmp(optarg, "dryrun_s5")) {
-                // Calculate over the first 125 elements of S_4.
-                set <mpq_class> S_4_125;
-                size_t i = 0;
-                for (mpq_class x: S_4) {
-                    S_4_125.insert(x);
-                    if (++i == 125) break;
-                }
-                size_t size = count_S5(S_4_125);
-                const size_t expected = 33947876;
-                if (size == expected) {
-                    printf("S_5/125 test passed.\n");
-                    return 0;
-                } else {
-                    printf("S_5/125 test failed: expected %zu, got %zu\n",
-                           expected, size);
                     return 1;
                 }
             } else {

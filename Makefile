@@ -16,7 +16,7 @@ clean:
 test: A273525
 	./A273525 -t intset
 	./A273525 -t dryrun_s4
-	./A273525 -t dryrun_s5
+	./A273525 -k 125 | grep -qF " = 33947876" && echo 'Passed: -k 125'
 
 TurboPFor:
 	cd $(TURBOPFOR) && $(MAKE) $(TURBOPFOR_OBJS)

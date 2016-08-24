@@ -1,11 +1,13 @@
 /*
  * OEIS A273525: define
  *   S_0 = {0, 1}
- *   S_{n+1} = { sum(s)/size(s) for nonempty s \subseteq S_n }
+ *   S_{n+1} = { sum(s)/size(s) for nonempty s ⊆ S_n }
  *
- * Then a_n = size(S_n).
+ * Then a_n = |S_n|.
  * It is easy to see that a_0 = 2, a_1 = 3, a_2 = 5, a_3 = 15, a_4 = 875.
  * This program calculates a_5.
+ *
+ * This program may be used according to the MIT license; see LICENSE file.
  */
 
 #include <cinttypes>

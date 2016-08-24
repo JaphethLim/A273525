@@ -7,7 +7,13 @@ http://math.stackexchange.com/questions/1797607
 
 ## Compiling and running
 
-Fetch the TurboPFor dependency and build with GNU g++:
+This program depends on:
+
+* the TurboPFor repo (included as a submodule)
+* the GNU MP library
+* GNU g++ or other C++ compiler
+
+Build with:
 
 ```
 git submodule update --init --recursive
